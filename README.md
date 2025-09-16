@@ -8,13 +8,14 @@ This repository demonstrates, with code and figures, the equivalence between two
 It covers both Poisson (frequency) and Tweedie (aggregate cost) models using scikit-learn and LightGBM, and includes simulation and real-data experiments.
 
 ## Key idea (short)
+
 - Poisson with log link: either model counts with an offset log(ω) or model rates with sample_weight = ω. Both give identical score and Hessian, hence the same estimator.
 - Tweedie with log link and variance V(μ) = μ^p: either model totals with an offset log(ω), or model rates with sample_weight = ω^(2−p). Again, both produce identical estimating equations under the usual GLM conditions.
 
 For precise statements and derivations, see docs/nonlife_regression.tex (and the PDF in docs/ if built).
 
-
 ## Core terms (beginner glossary)
+
 - Non-life insurance pricing: pricing for property & casualty (e.g., auto, home). We model expected claims cost rather than final premium (which adds expenses, profit, taxes).
 - Exposure (ω): the amount of risk observed (e.g., policy-years). Partial-term policies have ω < 1. Exposure scales both expected counts and totals.
 - Frequency: expected number of claims per unit exposure. Often modeled with a Poisson GLM.
@@ -31,8 +32,8 @@ For precise statements and derivations, see docs/nonlife_regression.tex (and the
 - Calibration plot: compares observed vs predicted rates across bins of a feature; good models track the observed curve.
 - Lorenz curve / Gini: ranks risks by predicted rate and plots cumulative share; higher Gini indicates stronger segmentation.
 
-
 ## Repository layout
+
 - scripts/
   - poisson_sim.py — synthetic Poisson example: offset vs weighted rates equivalence, incl. LightGBM variants.
   - tweedie_sim.py — synthetic Tweedie example (1 < p ≤ 2): equivalence checks across implementations.
@@ -60,10 +61,17 @@ If pip installation of lightgbm fails on Windows, prefer the conda-forge package
 
 ## Quick start (recommended paths)
 
-Pick ONE of the two setup methods below. Both create an isolated environment and install the dependencies declared in pyproject.toml.
+First, clone the repository to your local machine and navigate into the project directory:
+
+```powershell
+git clone https://github.com/ThomasBury/offset_weight_equivalence
+cd offset_weight_equivalence
+```
+
+Then, pick ONE of the two setup methods below. Both create an isolated environment and install the dependencies declared in `pyproject.toml`.
 All commands below are intended for PowerShell (pwsh).
 
-### Option A — Setup with Conda (Recommended for Windows)
+### Option A — Setup with Conda
 
 1. **Install Miniforge or Miniconda** (Conda) if you don’t have it.
     - Miniforge (conda-forge first): <https://conda-forge.org/download/>
@@ -106,52 +114,45 @@ Notes:
 
 ### Option B — Setup with uv (Fast, Lockfile-based)
 
-`uv` is a fast Python package installer and environment manager. It can create a virtual environment and sync dependencies from `pyproject.toml`/`uv.lock`.
+`uv` is a fast Python package installer and environment manager. These steps will create a virtual environment and run the scripts without needing to manually activate it.
 
 1. **Install `uv`** (PowerShell):
 
     ```powershell
-    iwr -useb https://astral.sh/uv/install.ps1 | iex
+    powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
     ```
 
-    Close and reopen PowerShell, or run: `$env:Path = "$env:USERPROFILE\.local\bin;" + $env:Path`
-    Verify with `uv --version`.
+    Close and reopen your terminal to ensure `uv` is in your `PATH`. Verify with `uv --version`.
 
-2. **Create and activate a virtual environment**:
+    or using `pipx` (to install `pipx`: run `pip install -U pipx`)
 
     ```powershell
-    # Create a virtual environment in .venv
-    uv venv .venv
-    
-    # Activate it
-    .\.venv\Scripts\Activate.ps1
+    pipx install uv
     ```
 
-3. **Sync dependencies** from `uv.lock`:
+2. **Sync dependencies** from `uv.lock`:
 
     ```powershell
     uv sync
     ```
 
-4. **Verify installation**:
+3. **Verify and Run Scripts**: Use `uv run` to execute commands within the managed environment.
 
     ```powershell
-    python -c "import numpy, pandas, sklearn, matplotlib, lightgbm; print('OK')"
-    ```
+    # Verify installation
+    uv run python -c "import numpy, pandas, sklearn, matplotlib, lightgbm; print('OK')"
 
-5. **Run scripts**:
-
-    ```powershell
-    python scripts/poisson_sim.py
-    python scripts/tweedie_sim.py
-    python scripts/poisson_tweedie_lightgbm.py
-    python scripts/tweedie_poisson_offset_from_average.py
+    # Run the main scripts
+    uv run python scripts/poisson_sim.py
+    uv run python scripts/tweedie_sim.py
+    uv run python scripts/poisson_tweedie_lightgbm.py
+    uv run python scripts/tweedie_poisson_offset_from_average.py
     ```
 
 Notes:
 
 - If `uv sync` reports issues with `lightgbm` wheels on your platform, you can either:
-  - fall back to Conda for lightgbm, or
+  - fall back to Conda for `lightgbm`, or
   - install a prebuilt wheel compatible with your Python/CPU.
 
 ## What Each Script Demonstrates
@@ -196,10 +197,3 @@ Notes:
   - Scripts clamp exposure with small epsilons (e.g., `1e-9`) where needed.
 - Offsets and early stopping in LightGBM:
   - When using `init_score` for offsets, ensure validation datasets also carry the same `init_score`; the provided code does this correctly.
-
-## Developing and notebooks (optional)
-
-- After creating your environment, you can start Jupyter:
-  - `jupyter notebook`
-- To add a kernel for this environment:
-  - `python -m ipykernel install --user --name tweedie-regr --display-name "tweedie-regr"`
