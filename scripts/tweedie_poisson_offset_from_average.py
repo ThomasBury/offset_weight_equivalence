@@ -99,7 +99,7 @@ print("boost_from_average = True :", sumA_true)
 
 # ===== Experiment B: Tweedie totals + offset =====
 p = 1.5
-X, expB, rateB, totalsB = make_tweedie_synth(n=250_000, p=p)
+X, expB, rateB, totalsB = make_tweedie_synth(n=100_000, p=p)
 
 mt_false, rate_pred_false_B = fit_lgb_offset(X, expB, totalsB, objective='tweedie', power=p, boost_from_average=False, lr=0.05, rounds=400)
 mt_true,  rate_pred_true_B  = fit_lgb_offset(X, expB, totalsB, objective='tweedie', power=p, boost_from_average=True,  lr=0.05, rounds=400)

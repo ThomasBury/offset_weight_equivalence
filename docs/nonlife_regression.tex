@@ -1,0 +1,628 @@
+\documentclass[10pt,aspectratio=169,xcolor={dvipsnames},usepdftitle=false]{beamer}
+\usepackage{presentation}
+% Enter presentation title to populate PDF metadata:
+\hypersetup{pdftitle={On the Equivalence of Offset and Weighted GLMs}}
+
+\begin{document}
+
+% Enter title:
+\title{On the Equivalence of Offset and Weighted GLMs and GBMs}
+
+\information
+% Enter authors:
+{Thomas Bury}
+% Enter location and date (can be commented out):
+{Internal Presentation -- September 2025}
+
+\frame{\titlepage}
+
+\begin{frame}
+\heading{Vocabulary}
+\end{frame}
+
+\begin{frame}
+\frametitle{Vocabulary \& notation}
+\small
+\begin{itemize}
+\item Data: 
+  \begin{itemize}
+    \item $n_i \in \{0,1,2,\dots\}$: observed number of claims for cell $i$.
+    \item $\omega_i > 0$: exposure (e.g.\ policy-years) for cell $i$.
+    \item $x_i \in \mathbb{R}^p$: vector of covariates (risk factors). 
+  \end{itemize}
+\item Model parameters:
+  \begin{itemize}
+    \item $\beta \in \mathbb{R}^p$: regression coefficients.
+    \item $\eta_i = x_i^\top \beta$: linear predictor.
+    \item $\mu_i = \exp(\eta_i)$: frequency per unit exposure.
+    \item $\lambda_i = \omega_i \mu_i$: expected count of claims.
+  \end{itemize}
+\item Tariff cells:
+  \begin{itemize}
+    \item Defined by discretization (binning) of risk factors.
+    \item Within each cell, exposure $\omega_i$ aggregates homogeneous risks.
+  \end{itemize}
+\end{itemize}
+\end{frame}
+
+
+\begin{frame}
+\heading{Poisson: weights and offset}
+\end{frame}
+
+
+\begin{frame}
+\frametitle{Two ways to incorporate exposure}
+\small
+\begin{block}{Poisson regression with offset}
+\[
+N_i \sim \text{Poisson}(\lambda_i), \quad 
+\lambda_i = \omega_i \mu_i, \quad
+\log \mu_i = x_i^\top \beta.
+\]
+Equivalent to
+\[
+\log \lambda_i = \al{\log \omega_i} + x_i^\top \beta,
+\]
+where $\log \omega_i$ enters as a \al{fixed offset}.
+\end{block}
+
+\begin{block}{Quasi-likelihood on rates with weights}
+Define rate $r_i = n_i/\omega_i$.  
+Objective:
+\[
+L_{\mathrm{wt}}(\beta) = \sum_i \omega_i \big[r_i \eta_i - e^{\eta_i}\big].
+\]
+This is algebraically identical to the offset likelihood (see later proof).
+\end{block}
+\end{frame}
+
+
+\begin{frame}
+\frametitle{Intuition: offset vs weights}
+\small
+\begin{itemize}
+\item \textbf{Offset view:} We predict counts. Exposure acts as a known multiplicative factor in \emph{intensity} $\lambda_i$.
+\item \textbf{Weight view:} We normalize by exposure to work with frequencies. To preserve the correct variance structure, we re-weight each observation by $\omega_i$.
+\item Mathematically: both give the same score and Hessian $\Rightarrow$ identical $\hat\beta$.
+\item Practically: choice is about \emph{implementation} (e.g., GLM vs. LightGBM).
+\end{itemize}
+\end{frame}
+
+
+\begin{frame}
+\frametitle{Step 1 — Poisson with log-exposure offset}
+\small
+\begin{exampleblock}{True Poisson log-likelihood (constants in $n_i!$ dropped)}
+\[
+\ell_{\mathrm{off}}(\beta)
+= \sum_{i=1}^N \Big[n_i \log \lambda_i - \lambda_i\Big]
+= \sum_{i=1}^N \Big[n_i(\log \omega_i + \eta_i) - \omega_i e^{\eta_i}\Big].
+\]
+Drop terms independent of $\beta$ to get the optimization objective: 
+\[
+\ell_{\mathrm{off}}(\beta)=\sum_{i=1}^N \Big[n_i \eta_i - \omega_i e^{\eta_i}\Big].
+\]
+\end{exampleblock}
+\begin{block}{Score and Hessian}
+\[
+\nabla \ell_{\mathrm{off}}=\sum_{i=1}^N (n_i-\omega_i e^{\eta_i})\,x_i,\qquad
+\nabla^2 \ell_{\mathrm{off}}=-\sum_{i=1}^N \omega_i e^{\eta_i}\,x_i x_i^\top.
+\]
+\end{block}
+\begin{itemize}
+\item Canonical link $\log$ $\Rightarrow$ strict concavity in $\beta$ $\Rightarrow$ unique maximizer $\hat\beta$.
+\end{itemize}
+\end{frame}
+
+\begin{frame}
+\frametitle{Step 2 — ``Rates + weights'': define a quasi-likelihood}
+\small
+\begin{alertblock}{Key caveat}
+If $N_i$ is Poisson, the rate $R_i \equiv N_i/\omega_i$ is \al{not} Poisson. There is no valid ``likelihood of the rates.''
+\end{alertblock}
+\begin{block}{Construct a \emph{weighted quasi-likelihood} per unit exposure}
+Define $r_i=n_i/\omega_i$ and consider
+\[
+\ell_{\mathrm{wt}}(\beta)\;=\;\sum_{i=1}^N \omega_i\big[r_i \eta_i - e^{\eta_i}\big]
+\;=\;\sum_{i=1}^N \big[n_i \eta_i - \omega_i e^{\eta_i}\big].
+\]
+\end{block}
+\begin{block}{Score and Hessian (identical to offset)}
+\[
+\nabla \ell_{\mathrm{wt}}=\sum_{i=1}^N (n_i-\omega_i e^{\eta_i})\,x_i,\qquad
+\nabla^2 \ell_{\mathrm{wt}}=-\sum_{i=1}^N \omega_i e^{\eta_i}\,x_i x_i^\top.
+\]
+\end{block}
+\begin{itemize}
+\item \textbf{Estimator equivalence:} $\ell_{\mathrm{wt}}$ and $\ell_{\mathrm{off}}$ have the same score/Hessian $\Rightarrow$ same $\hat\beta$ and same fitted means.
+\end{itemize}
+\end{frame}
+
+\begin{frame}
+\frametitle{Step 3 — Why the optimizers coincide}
+\small
+\begin{enumerate}
+\item Offset likelihood objective:
+\[
+\ell_{\mathrm{off}}(\beta)=\sum_i \big[n_i \eta_i - \omega_i e^{\eta_i}\big].
+\]
+\item Quasi-likelihood (rates + weights):
+\[
+\ell_{\mathrm{wt}}(\beta)=\sum_i \omega_i\big[(n_i/\omega_i)\eta_i - e^{\eta_i}\big]
+=\sum_i \big[n_i \eta_i - \omega_i e^{\eta_i}\big].
+\]
+\item Therefore $\ell_{\mathrm{off}}\equiv \ell_{\mathrm{wt}}$ as functions of $\beta$ (up to constants), with identical score/Hessian.
+\item Strict concavity under log link $\Rightarrow$ unique maximizer $\hat\beta$ in both cases.
+\end{enumerate}
+\begin{block}{What this statement \emph{is}}
+Equality of \emph{optimization objectives}/estimators (likelihood vs.\ quasi-likelihood), \al{not} equality of a true likelihood for $R_i$.
+\end{block}
+\end{frame}
+
+\begin{frame}
+\frametitle{Conditions for equivalence \& where it fails}
+\small
+\begin{block}{Holds when}
+\begin{itemize}
+\item Poisson GLM with \al{canonical} log link.
+\item Objective is the \al{sum} of contributions (no hidden normalization changes).
+\item No extra penalties, or penalties scaled consistently across parameterizations.
+\end{itemize}
+\end{block}
+\begin{alertblock}{Does \emph{not} hold when}
+\begin{itemize}
+\item Using non-canonical links or different distributions (e.g., NB with logit of mean-variance).
+\item Using squared error on rates (MSE on $r_i$) instead of the Poisson objective.
+\item Computing likelihood-based ICs (AIC) from the ``rates'' objective (it is not a true likelihood).
+\end{itemize}
+\end{alertblock}
+\end{frame}
+
+\begin{frame}
+\frametitle{Practical caveats — Poisson GBM (LightGBM)}
+\small
+\textbf{Two equivalent ways to encode exposure in LightGBM}
+\begin{enumerate}
+\item \textbf{Sample weights:} use \texttt{objective="poisson"}, labels $y_i=r_i$, and \texttt{sample\_weight} $=\omega_i$.
+\item \textbf{Offset via init\_score:} labels $y_i=n_i$, set \texttt{init\_score} $=\log \omega_i$ (per-row constant added to raw score), weights $=1$.
+\end{enumerate}
+Both yield identical per-point gradients/Hessians:
+\[
+g_i=\omega_i e^{f_i}-n_i,\qquad h_i=\omega_i e^{f_i},
+\]
+with $f_i$ the current raw score (including \texttt{init\_score} when used).
+
+
+\end{frame}
+
+\begin{frame}
+\frametitle{Practical caveats — Poisson GBM (LightGBM)}
+\begin{block}{Which should we use in a dataset class?}
+\begin{itemize}
+\item Default to \al{\texttt{sample\_weight} = $\omega_i$} for LightGBM Poisson: simplest, robust across CV/early stopping/metrics.
+\item Use \al{\texttt{init\_score} = $\log \omega_i$} when you need an explicit offset (e.g., to align with GLM formulations, or to pass the same offset into scoring on holdout).
+\item Provide a toggle and test that the two modes produce numerically equivalent training curves on the same seed.
+\end{itemize}
+\end{block}
+\end{frame}
+
+\begin{frame}
+\frametitle{Practical caveats — metrics, regularization, stability}
+\small
+\begin{itemize}
+\item \textbf{Tiny exposure} small exposure values can break the optimization or prevent convergence. 
+\item \textbf{Metrics \& early stopping:} ensure validation metrics are computed with the \emph{same} weights $\omega_i$ if using \texttt{sample\_weight}. Mixing weighted training with unweighted early stopping biases model selection.
+\item \textbf{Regularization scaling:} many libs minimize averaged loss. If you switch between offset and weights, the effective strength of $\ell_1/\ell_2$ penalties may change. Scale penalties with total weight.
+\item \textbf{Prediction reconstruction:} with \texttt{sample\_weight}, model learns $\eta_i$; compute $\hat\lambda_i=\omega_i\,\exp(\hat\eta_i)$. With \texttt{init\_score}, the offset is already baked into the raw score.
+\item \textbf{Large exposures:} extremely large $\omega_i$ can dominate gradients. Consider capping exposures or grouping to stabilize training; always inspect leverage points.
+\item \textbf{Don’t use MSE on rates:} it breaks the Poisson equivalence; stick to the Poisson objective for count data with exposure.
+\end{itemize}
+\end{frame}
+
+\begin{frame}
+\frametitle{Bottom line \& references}
+\small
+\begin{itemize}
+\item For Poisson/log-link GLMs, \textbf{log-exposure offset} and \textbf{rates + weights} yield the \textbf{same estimator} (identical score/Hessian).
+\item In LightGBM, prefer \texttt{sample\_weight} for simplicity; support \texttt{init\_score} when an explicit offset is required. Validate equivalence in unit tests.
+\end{itemize}
+\vspace{0.5em}
+Statement noted in \cite{anders} (no proof). See also GLM treatments for the Exponential Dispersion Family under canonical links in \cite{glmbook}.
+\end{frame}
+
+
+
+\begin{frame}
+\heading{Tweedie: offset vs weighted rates}
+\end{frame}
+
+\begin{frame}
+\frametitle{Tweedie Distribution (Setup)}
+
+\small
+Let $Y_i$ be aggregate claims for risk $i$, with exposure $\omega_i > 0$ and covariates $x_i$.
+We define:
+
+\[
+R_i = \tfrac{Y_i}{\omega_i}, \qquad
+\mu_i = \mathbb{E}[R_i], \qquad
+\tilde{\mu}_i = \mathbb{E}[Y_i] = \omega_i \mu_i.
+\]
+
+We use a Tweedie GLM with power index $p \in (1,2]$ and a log link:
+
+\[
+\eta_i = x_i^\top \beta, \quad
+\mu_i = e^{\eta_i}, \quad
+\log \tilde{\mu}_i = \log \omega_i + \eta_i.
+\]
+
+\begin{exampleblock}{Tweedie exponential dispersion family}
+The density (up to a normalising constant $c$) is
+\[
+f(y_i;\tilde{\mu}_i, \phi, p)
+= \exp\left\{
+\tfrac{y_i \tilde{\mu}_i^{1-p}}{(1-p)\,\phi}
+- \tfrac{\tilde{\mu}_i^{2-p}}{(2-p)\,\phi}
++ c(y_i,\phi,p)
+\right\},
+\]
+with variance function
+\[
+\mathrm{Var}(Y_i) = \phi \, \tilde{\mu}_i^{p}.
+\]
+\end{exampleblock}
+
+\end{frame}
+
+
+\begin{frame}
+\frametitle{Iteratively Reweighted Least Squares (IRLS)}
+
+\small
+In a GLM, the coefficients $\beta$ are updated by solving a weighted least squares problem.
+At iteration $t$:
+
+\[
+\beta^{(t+1)}
+= (X^\top W^{(t)} X)^{-1} X^\top W^{(t)} z^{(t)}.
+\]
+
+\textbf{Working quantities}
+\begin{align*}
+\eta_i^{(t)} &= x_i^\top \beta^{(t)} & & \text{(linear predictor)} \\
+\mu_i^{(t)} &= g^{-1}(\eta_i^{(t)}) & & \text{(fitted mean)} \\
+D_i^{(t)} &= \left. \tfrac{d \mu}{d \eta} \right|_{\eta=\eta_i^{(t)}} & & \text{(derivative of link)} \\
+z_i^{(t)} &= \eta_i^{(t)} + \tfrac{y_i - \mu_i^{(t)}}{D_i^{(t)}} & & \text{(working response)} \\
+w_i^{(t)} &= \tfrac{1}{\phi} \frac{(D_i^{(t)})^2}{V(\mu_i^{(t)})} & & \text{(working weight)}
+\end{align*}
+
+
+\end{frame}
+
+
+\begin{frame}
+\frametitle{Tweedie IRLS (log link)}
+
+\small
+For Tweedie GLM with $V(\mu)=\mu^p$ and $g(\mu)=\log \mu$:
+
+\[
+\mu_i = e^{\eta_i}, \quad
+\frac{d \mu_i}{d \eta_i} = \mu_i.
+\]
+
+\textbf{Offset form} (aggregate mean $\tilde{\mu}_i=\omega_i \mu_i$)
+\[
+z_i^{\text{off}} = \log \tilde{\mu}_i + \frac{y_i-\tilde{\mu}_i}{\tilde{\mu}_i}, \quad
+w_i^{\text{off}} = \frac{1}{\phi} (\tilde{\mu}_i)^{2-p}
+= \frac{1}{\phi}(\omega_i \mu_i)^{2-p}.
+\]
+
+
+\textbf{Rates + weights form} ($r_i=y_i/\omega_i$, weight $s_i=\omega_i^{2-p}$)
+\[
+z_i^{\text{wt}} = \eta_i + \frac{r_i-\mu_i}{\mu_i}, \quad
+w_i^{\text{wt}} = \frac{s_i}{\phi}\, \mu_i^{2-p}.
+\]
+\end{frame}
+
+\begin{frame}
+\frametitle{Tweedie score with log-exposure offset (quasi-likelihood)}
+
+\small
+\begin{exampleblock}{Quasi log-likelihood (ignoring $y$-only constants)}
+\[
+\ell_{\text{off}}(\beta)
+\;\propto\;
+- \sum_{i=1}^N
+\frac{1}{\phi}
+\left[
+  \frac{(\tilde{\mu}_i)^{2-p}}{2-p}
+  - \frac{y_i(\tilde{\mu}_i)^{1-p}}{1-p}
+\right],
+\qquad
+\tilde{\mu}_i = \omega_i e^{\eta_i}.
+\]
+\end{exampleblock}
+
+\begin{block}{Score function (log link)}
+Let $\tilde\eta_i=\log \tilde{\mu}_i=\log\omega_i+\eta_i$. Then
+\[
+\nabla \ell_{\mathrm{off}}
+= \sum_{i=1}^N \frac{y_i-\tilde{\mu}_i}{\phi\,(\tilde{\mu}_i)^{p}}\,\frac{d\tilde{\mu}_i}{d\tilde\eta_i}\,x_i
+= \sum_{i=1}^N \frac{y_i-\tilde{\mu}_i}{\phi\,(\tilde{\mu}_i)^{p}}\,\tilde{\mu}_i\,x_i
+= \sum_{i=1}^N \frac{y_i-\tilde{\mu}_i}{\phi}\,(\tilde{\mu}_i)^{1-p} x_i.
+\]
+\end{block}
+\end{frame}
+
+
+\begin{frame}
+\frametitle{Tweedie score with per-exposure normalization (quasi-likelihood)}
+\small
+Define rates $R_i \equiv Y_i/\omega_i$ so that $\mathbb{E}[R_i]=\mu_i$ and
+\[
+\mathrm{Var}(R_i)
+= \frac{\mathrm{Var}(Y_i)}{\omega_i^2}
+= \frac{\phi\,(\tilde\mu_i)^p}{\omega_i^2}
+= \frac{\phi}{\omega_i^{2-p}}\,\mu_i^p.
+\]
+Thus the \textbf{effective dispersion} for $R_i$ is $\phi_r = \phi/\omega_i^{2-p}$.
+
+$\text{prior/sample weight } s_i = \omega_i^{2-p} \quad\Longleftrightarrow\quad \phi_r=\phi/s_i.$
+
+Quasi-log-likelihood (up to $r_i$-only constants):
+$
+\ell_{\mathrm{wt}}(\beta)
+\;\propto\; -\sum_{i=1}^N \frac{s_i}{\phi}
+\left[\frac{\mu_i^{2-p}}{2-p}-\frac{r_i\mu_i^{1-p}}{1-p}\right].
+$
+    
+\begin{block}{Score (log-link)}
+With $\eta_i=\log\mu_i$,
+\[
+\nabla \ell_{\mathrm{wt}}
+= \sum_{i=1}^N \frac{s_i}{\phi}\,\frac{r_i-\mu_i}{\mu_i^{p}}\,\frac{d\mu_i}{d\eta_i}\,x_i
+= \sum_{i=1}^N \frac{s_i}{\phi}\,(r_i-\mu_i)\,\mu_i^{1-p} x_i.
+\]
+
+\end{block}
+\end{frame}
+
+
+\begin{frame}
+\frametitle{Tweedie equivalence (log link)}
+
+\begin{block}{Key result}
+With $s_i=\omega_i^{2-p}$ and $r_i=y_i/\omega_i$:
+\[
+\nabla \ell_{\text{off}}(\beta) = \nabla \ell_{\text{wt}}(\beta), \quad
+W_i^{\text{off}} = W_i^{\text{wt}}.
+\]
+Thus the two approaches give identical estimating equations and Hessian. Special cases:
+
+\begin{itemize}
+    \item $p=1$ (Poisson): $s_i = \omega_i$.
+    \item $p=2$ (Gamma): $s_i = 1$, exposure affects only the mean.
+\end{itemize}
+
+\end{block}
+
+
+\begin{exampleblock}{Conclusion}
+With a \textbf{log link} and \textbf{Tweedie variance $V(\mu)=\mu^p$}, the offset and rates+weights formulations yield \al{identical} score functions and IRLS weights. Hence, when the GLM normal equations have a unique solution (full column rank), they produce the \textbf{same estimator} $\hat\beta$ and the same fitted means.
+\end{exampleblock}
+\end{frame}
+
+\begin{frame}
+\frametitle{Conditions for equivalence \& when it fails (Tweedie)}
+\small
+\begin{block}{Holds when}
+\begin{itemize}
+\item \textbf{Log link} on the mean: $\log \tilde\mu=\log \omega + x^\top\beta$ so exposure is a true additive offset.
+\item Tweedie GLM with $V(\mu)=\mu^p$ and $p\in(1,2]$ (Poisson $p{=}1$, Gamma $p{=}2$ as limits).
+\item In \emph{rates} formulation, use \textbf{weights $s_i=\omega_i^{2-p}$}.
+\end{itemize}
+\end{block}
+\begin{alertblock}{Fails or changes when}
+\begin{itemize}
+\item \textbf{Non-log links:}  $g(\omega\mu)\neq g(\mu)+\text{const}$, so exposure cannot be a fixed offset; equivalence breaks.
+\item \textbf{Wrong weights on rates:} using $s_i=\omega_i$ (Poisson-style) when $p\neq 1$ distorts the variance and the estimator.
+\item \textbf{MSE on rates:} replacing the Tweedie objective by squared error destroys the equivalence.
+\item \textbf{Penalties/averaging:} if losses are averaged, rescale $\ell_1/\ell_2$ by total weight to keep regularization comparable across parameterizations.
+\end{itemize}
+\end{alertblock}
+
+
+\textbf{REM:} $p{=}1$ (Poisson): $s_i=\omega_i$ and $p{=}2$ (Gamma): $s_i=\omega_i^{0}=1$ (exposure offset only; no reweighting).
+
+
+\end{frame}
+
+\begin{frame}
+\frametitle{Practical caveats — Tweedie GBM (LightGBM)}
+\small
+LightGBM uses a log link for \texttt{objective="tweedie"} with index $p\in(1,2)$. Let the raw score be $f_i$ and $\hat\tilde\mu_i=\exp(f_i)$.
+
+\begin{block}{Two equivalent encodings of exposure}
+\begin{enumerate}
+\item \textbf{Offset on totals:} train on $y_i$ with
+  \[
+  \texttt{init\_score}_i=\log\omega_i,\quad \texttt{sample\_weight}_i=1.
+  \]
+\item \textbf{Weighted rates:} train on $r_i=y_i/\omega_i$ with
+  \[
+  \texttt{init\_score}_i=0,\quad \texttt{sample\_weight}_i=\omega_i^{2-p}.
+  \]
+\end{enumerate}
+\end{block}
+\end{frame}
+
+\begin{frame}
+\frametitle{Practical caveats — Tweedie GBM (LightGBM)}
+
+\begin{block}{Gradient/Hessian equality ($\phi$ acts as a dispersion constant and cancels in tree growth.)}
+Per point (lightgbm uses first/second derivatives of the loss):
+\[
+g_i \propto (\hat{\tilde{\mu}}_i)^{2-p} - y_i\,(\hat{\tilde{\mu}}_i)^{1-p}, \qquad
+h_i \propto (2-p)\,(\hat{\tilde{\mu}}_i)^{2-p} - (1-p)\,y_i\,(\hat{\tilde{\mu}}_i)^{1-p}.
+\]
+With Option 1, $\hat{\tilde{\mu}}_i=\omega_i e^{\eta_i}$.
+With Option 2, $g_i,h_i$ are multiplied by $\omega_i^{2-p}$ and $y_i$ is replaced by $r_i=y_i/\omega_i$, yielding the \textbf{same} $g_i,h_i$ numerically. Hence identical trees (same seed) and the same fitted means.
+\end{block}
+
+\begin{itemize}
+\item \textbf{Metrics/early stopping:} If training on rates, compute validation metrics with the same weights $\omega^{2-p}$ (or reconstruct totals).
+\item \textbf{Large exposures:} leverage grows like $\omega^{2-p}$; inspect/cap extreme exposures to stabilize training.
+\end{itemize}
+\end{frame}
+
+\begin{frame}
+\frametitle{Intuition and takeaways (Tweedie)}
+\small
+\begin{itemize}
+\item \textbf{Offset view:} exposure scales the \emph{mean} linearly; variance grows as $(\omega\mu)^p$.
+\item \textbf{Rates view:} dividing by $\omega$ attenuates variance by $\omega^{2-p}$; weighting by $\omega^{2-p}$ restores the correct contribution to the score/Hessian.
+\item \textbf{Unification:} Poisson ($p{=}1$) $\Rightarrow$ weights $\omega$; Gamma ($p{=}2$) $\Rightarrow$ no reweighting; in-between smoothly interpolates.
+\item \textbf{Rule of thumb:} \emph{Log link + weights $=\omega^{2-p}$} is the exact Tweedie analogue of the Poisson offset/weights equivalence.
+\end{itemize}
+\end{frame}
+
+\begin{frame}
+\heading{Tweedie Regression}
+\end{frame}
+
+\begin{frame}
+\frametitle{Exponential Dispersion Family (EDF) setup}
+\small
+\begin{itemize}
+\item General EDF density:
+\[
+f(y;\theta,\phi) = \exp\left\{\frac{y\theta - b(\theta)}{\phi} + c(y,\phi)\right\},
+\]
+with mean $\mu = b'(\theta)$ and variance $\mathrm{Var}(Y)=\phi V(\mu)$.
+\item For GLMs:
+\[
+g(\mu_i) = x_i^\top \beta, \qquad g(\cdot): \text{link function}.
+\]
+\item Exposure $\omega_i$ enters as:
+\[
+\theta_i \mapsto \theta_i + \log \omega_i \quad \text{(offset formulation)}.
+\]
+\end{itemize}
+\end{frame}
+
+
+\begin{frame}
+\frametitle{Tweedie distribution}
+\small
+\begin{itemize}
+\item The \textbf{Tweedie} family: variance function
+\[
+V(\mu) = \mu^p, \qquad 1 < p < 2 \;\; \Rightarrow \;\; \text{compound Poisson--Gamma}.
+\]
+\item Mean/variance structure:
+\[
+\mathbb{E}[Y_i] = \mu_i, \qquad \mathrm{Var}(Y_i) = \phi \mu_i^p.
+\]
+\item Used in insurance for claim cost modeling:
+  \begin{itemize}
+    \item $p=1$ $\Rightarrow$ overdispersed Poisson (frequency).
+    \item $p=2$ $\Rightarrow$ Gamma (severity).
+    \item $1<p<2$ $\Rightarrow$ compound Poisson–Gamma (aggregate claims).
+  \end{itemize}
+\end{itemize}
+\end{frame}
+
+
+\begin{frame}
+\frametitle{Offset vs weights in Tweedie GLMs}
+\small
+\begin{block}{Offset approach}
+\[
+Y_i \sim \text{Tweedie}(\mu_i \omega_i, \phi, p), \qquad \log \mu_i = x_i^\top \beta.
+\]
+\[
+\Rightarrow \; \log \mathbb{E}[Y_i] = \log \omega_i + x_i^\top \beta.
+\]
+\end{block}
+
+\begin{block}{Rates + weights approach}
+\[
+R_i = \frac{Y_i}{\omega_i}, \qquad \mathbb{E}[R_i]=\mu_i.
+\]
+Variance:
+\[
+\mathrm{Var}(R_i) = \frac{\phi}{\omega_i^{2-p}} \mu_i^p.
+\]
+\textbf{Weighting by $\omega_i^{2-p}$} restores correct variance scaling.
+\end{block}
+\end{frame}
+
+
+\begin{frame}
+\frametitle{General equivalence conditions}
+\small
+\begin{itemize}
+\item For Poisson ($p=1$):
+  \[
+  \mathrm{Var}(R_i) = \frac{\mu_i}{\omega_i} \quad \Rightarrow \quad \text{weight } \omega_i.
+  \]
+  Matches the offset equivalence.
+\item For Tweedie $1<p<2$:
+  \[
+  \mathrm{Var}(R_i) = \frac{\phi}{\omega_i^{2-p}} \mu_i^p.
+  \]
+  Requires weight $\omega_i^{2-p}$ to match offset formulation.
+\item Thus:
+  \begin{block}{Equivalence principle}
+  Offset and weighted-rates formulations yield identical score/Hessian \emph{only if} weights are scaled as $\omega_i^{2-p}$.
+  \end{block}
+\end{itemize}
+\end{frame}
+
+
+\begin{frame}
+\frametitle{Intuition in Tweedie regression}
+\small
+\begin{itemize}
+\item \textbf{Offset view:} exposure scales expected aggregate claim cost linearly.
+\item \textbf{Weights view:} normalizing by exposure alters variance structure; weighting by $\omega_i^{2-p}$ corrects this.
+\item \textbf{Poisson special case:} $p=1$, weight reduces to $\omega_i$ (what we already proved).
+\item \textbf{Gamma special case:} $p=2$, weight reduces to $1$ — exposure has no variance effect (modeling average cost).
+\item Practical note: in software libraries (e.g.\ LightGBM, XGBoost), Tweedie objectives implicitly assume offset parameterization; manual reweighting may be needed if working with normalized rates.
+\end{itemize}
+\end{frame}
+
+\begin{frame}
+\frametitle{References}
+	\begin{thebibliography}{10}
+
+	\beamertemplatebookbibitems
+	\bibitem{glmbook}
+	Ohlsson, Esbjörn and Johansson, Björn
+	\newblock Non Non-life insurance pricing with generalized linear models
+	\newblock Springer, 2010
+
+	\beamertemplatearticlebibitems
+	\bibitem{kivan}
+	Kaivanipour, Kivan
+	\newblock Non-Life Insurance Pricing Using the Generalized Additive Model, Smoothing Splines and L-Curves
+	\newblock 2015
+
+	\beamertemplatearticlebibitems
+	\bibitem{anders}
+	Anderson, D and Feldblum, S and Modlin, C and Schirmacher, D and Schirmacher, E and Thandi, N
+	\newblock A Practitioner's Guide to Generalized Linear Models: A Foundation for Theory
+    \newblock Interpretation and Application, Watson Wyatt Worldwide, London
+	\newblock 2005
+
+
+  \end{thebibliography}
+\end{frame}
+
+\lastslide
+
+\end{document}

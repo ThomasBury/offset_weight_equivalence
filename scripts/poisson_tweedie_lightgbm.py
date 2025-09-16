@@ -31,6 +31,8 @@ from __future__ import annotations
 import warnings
 import numpy as np
 import pandas as pd
+import matplotlib
+matplotlib.use("Agg")  # Use a non-interactive backend to avoid tkinter issues
 import matplotlib.pyplot as plt
 
 from sklearn.datasets import fetch_openml
@@ -127,6 +129,11 @@ def build_column_transformer():
             (
                 "binned_numeric",
                 KBinsDiscretizer(n_bins=10, encode="onehot-dense", strategy="quantile"),
+                # Use quantile binning to handle skewed distributions like age.
+                # Each bin will contain approximately the same number of samples.
+                KBinsDiscretizer(
+                    n_bins=10, encode="onehot-dense", strategy="quantile"
+                ),
                 ["VehAge", "DrivAge"],
             ),
             ("onehot_categorical", ohe, ["VehBrand", "VehPower", "VehGas", "Region", "Area"]),
@@ -556,7 +563,9 @@ ax.set(
 )
 ax.legend(loc="lower right")
 plt.tight_layout()
-plt.show()
+plt.savefig("lorenz_curve_tweedie.png")
+plt.close(fig)
+print("\nSaved Tweedie Lorenz curve to lorenz_curve_tweedie.png")
 
 # %% [markdown]
 # ## Metrics tables (TEST) under two evaluation weightings
@@ -631,7 +640,9 @@ for feat in feature_list:
     )
     ax.legend()
     plt.tight_layout()
-    plt.show()
+    plt.savefig(f"calibration_sklearn_{feat}.png")
+    plt.close(fig)
+    print(f"Saved sklearn calibration plot for {feat} to calibration_sklearn_{feat}.png")
 
     # --- LightGBM models comparison ---
     if LGB_AVAILABLE:
@@ -665,7 +676,9 @@ for feat in feature_list:
         )
         ax.legend()
         plt.tight_layout()
-        plt.show()
+        plt.savefig(f"calibration_lgbm_{feat}.png")
+        plt.close(fig)
+        print(f"Saved LightGBM calibration plot for {feat} to calibration_lgbm_{feat}.png")
 
 # %% [markdown]
 # ---
@@ -754,7 +767,9 @@ ax.set(
 )
 ax.legend(loc="lower right")
 plt.tight_layout()
-plt.show()
+plt.savefig("lorenz_curve_frequency.png")
+plt.close(fig)
+print("\nSaved Frequency Lorenz curve to lorenz_curve_frequency.png")
 
 # --- Calibration Plot ---
 feat = "DrivAge" # Pick one feature for demonstration
@@ -791,7 +806,9 @@ ax.fill_between(
 ax.set(title=f"TEST: Frequency Calibration by {feat}", xlabel=feat, ylabel="Claim Frequency (per exposure)")
 ax.legend()
 plt.tight_layout()
-plt.show()
+plt.savefig("calibration_frequency_DrivAge.png")
+plt.close(fig)
+print("Saved Frequency calibration plot for DrivAge to calibration_frequency_DrivAge.png")
 # %%
 pred_freq_test
 # %%
