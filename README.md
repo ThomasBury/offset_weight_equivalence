@@ -12,7 +12,7 @@ It covers both Poisson (frequency) and Tweedie (aggregate cost) models using sci
 - Poisson with log link: either model counts with an offset log(ω) or model rates with sample_weight = ω. Both give identical score and Hessian, hence the same estimator.
 - Tweedie with log link and variance V(μ) = μ^p: either model totals with an offset log(ω), or model rates with sample_weight = ω^(2−p). Again, both produce identical estimating equations under the usual GLM conditions.
 
-For precise statements and derivations, see docs/nonlife_regression.tex (and the PDF in docs/ if built).
+For precise statements and derivations, see [PDF](.\docs\offset_and_weight_equivalence.pdf).
 
 ## Core terms (beginner glossary)
 
@@ -48,17 +48,6 @@ For precise statements and derivations, see docs/nonlife_regression.tex (and the
 
 Note: Some duplicate or misspelled script names may exist at the repository root; use the scripts/ versions as authoritative.
 
-## Requirements
-
-- OS: Windows (tested with PowerShell 7+). Works on Linux/macOS with analogous steps.
-- Python: 3.13+
-- Packages (installed via Conda or uv/pip):
-  - `numpy`, `pandas`, `scikit-learn`, `matplotlib`
-  - `lightgbm` (required for LightGBM experiments)
-  - `jupyter`, `ipykernel` (optional; for notebooks/kernels)
-
-If pip installation of lightgbm fails on Windows, prefer the conda-forge packages.
-
 ## Quick start (recommended paths)
 
 First, clone the repository to your local machine and navigate into the project directory:
@@ -68,7 +57,7 @@ git clone https://github.com/ThomasBury/offset_weight_equivalence
 cd offset_weight_equivalence
 ```
 
-Then, pick ONE of the two setup methods below. Both create an isolated environment and install the dependencies declared in `pyproject.toml`.
+Then, pick **ONE** of the two setup methods below. Both create an isolated environment and install the dependencies declared in `pyproject.toml`.
 All commands below are intended for PowerShell (pwsh).
 
 ### Option A — Setup with Conda
