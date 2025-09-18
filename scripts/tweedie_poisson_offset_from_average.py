@@ -3,12 +3,33 @@
 #  (A) Poisson frequency with counts label + offset log(exposure)
 #  (B) Tweedie severity with totals label + offset log(exposure)
 # For each, compare models trained with boost_from_average=True vs False.
+from typing import Dict, Optional, Tuple
 import numpy as np, pandas as pd, lightgbm as lgb
 from sklearn.metrics import mean_poisson_deviance, mean_tweedie_deviance
 
 rng = np.random.default_rng(42)
 
-def make_poisson_synth(n=200_000):
+def make_poisson_synth(n: int = 200_000) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Generate synthetic data for a Poisson regression model.
+
+    Creates features, a highly variable exposure, a true underlying rate,
+    and observed counts based on a Poisson distribution where the mean is
+    the product of exposure and rate.
+
+    Parameters
+    ----------
+    n : int, optional
+        Number of samples to generate, by default 200_000.
+
+    Returns
+    -------
+    Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]
+        A tuple containing:
+        - X: Feature matrix (n_samples, n_features).
+        - exposure: Exposure array (n_samples,).
+        - rate: True rate per unit of exposure (n_samples,).
+        - counts: Simulated claim counts (n_samples,).
+    """
     # features
     x1 = rng.normal(size=n)
     x2 = rng.uniform(-1, 1, size=n)
@@ -27,7 +48,29 @@ def make_poisson_synth(n=200_000):
 
     return X, exposure, rate, counts
 
-def make_tweedie_synth(n=200_000, p=1.5):
+def make_tweedie_synth(n: int = 200_000, p: float = 1.5) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Generate synthetic data for a Tweedie regression model.
+
+    Creates features, exposure, a true rate, and total claim amounts.
+    The totals are simulated from a Gamma distribution to approximate a
+    Tweedie distribution with a power parameter `p` between 1 and 2.
+
+    Parameters
+    ----------
+    n : int, optional
+        Number of samples to generate, by default 200_000.
+    p : float, optional
+        Tweedie variance power, by default 1.5.
+
+    Returns
+    -------
+    Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]
+        A tuple containing:
+        - X: Feature matrix (n_samples, n_features).
+        - exposure: Exposure array (n_samples,).
+        - rate: True rate (pure premium) per unit of exposure (n_samples,).
+        - totals: Simulated total claim amounts (n_samples,).
+    """
     # features
     x1 = rng.normal(size=n)
     x2 = rng.uniform(-1, 1, size=n)
@@ -56,7 +99,42 @@ def make_tweedie_synth(n=200_000, p=1.5):
 
     return X, exposure, rate, totals
 
-def fit_lgb_offset(X, exposure, label, objective, power=None, boost_from_average=False, lr=0.05, rounds=400):
+def fit_lgb_offset(
+    X: np.ndarray,
+    exposure: np.ndarray,
+    label: np.ndarray,
+    objective: str,
+    power: Optional[float] = None,
+    boost_from_average: bool = False,
+    lr: float = 0.05,
+    rounds: int = 400,
+) -> Tuple[lgb.Booster, np.ndarray]:
+    """Fit a LightGBM model using log(exposure) as an offset via init_score.
+
+    Parameters
+    ----------
+    X : np.ndarray
+        Feature matrix.
+    exposure : np.ndarray
+        Exposure values for each sample. Used to compute the offset.
+    label : np.ndarray
+        Target variable (e.g., counts or totals).
+    objective : str
+        LightGBM objective function (e.g., 'poisson' or 'tweedie').
+    power : Optional[float], optional
+        Tweedie variance power, required if objective is 'tweedie'. By default None.
+    boost_from_average : bool, optional
+        LightGBM's `boost_from_average` parameter. By default False.
+    lr : float, optional
+        Learning rate. By default 0.05.
+    rounds : int, optional
+        Number of boosting rounds. By default 400.
+
+    Returns
+    -------
+    Tuple[lgb.Booster, np.ndarray]
+        A tuple containing the trained LightGBM model and the predicted rates.
+    """
     eps = 1e-9
     init = np.log(np.maximum(exposure, eps))
     dtrain = lgb.Dataset(X, label=label, init_score=init, free_raw_data=True)
@@ -68,7 +146,31 @@ def fit_lgb_offset(X, exposure, label, objective, power=None, boost_from_average
     pred_rate = model.predict(X)  # rate per exposure (given offset usage)
     return model, pred_rate
 
-def summarize_poisson(rate_true, exposure, counts, rate_pred):
+def summarize_poisson(
+    rate_true: np.ndarray, exposure: np.ndarray, counts: np.ndarray, rate_pred: np.ndarray
+) -> Dict[str, float]:
+    """Calculate and summarize metrics for a Poisson model.
+
+    Computes the exposure-weighted mean Poisson deviance between true and
+    predicted rates, and compares the aggregate true and predicted counts.
+
+    Parameters
+    ----------
+    rate_true : np.ndarray
+        The true underlying rate.
+    exposure : np.ndarray
+        The exposure for each observation.
+    counts : np.ndarray
+        The observed counts (unused in calculation but kept for context).
+    rate_pred : np.ndarray
+        The predicted rate from the model.
+
+    Returns
+    -------
+    Dict[str, float]
+        A dictionary of metrics: 'poisson_dev', 'agg_true_counts',
+        'agg_pred_counts', and 'ratio'.
+    """
     # Evaluate on rate-level with exposure weighting
     sw = exposure
     dev = mean_poisson_deviance(rate_true, rate_pred, sample_weight=sw)
@@ -77,7 +179,33 @@ def summarize_poisson(rate_true, exposure, counts, rate_pred):
     agg_pred = (rate_pred * exposure).sum()
     return dict(poisson_dev=dev, agg_true_counts=agg_true, agg_pred_counts=agg_pred, ratio=agg_pred/agg_true)
 
-def summarize_tweedie(rate_true, exposure, totals, rate_pred, p):
+def summarize_tweedie(
+    rate_true: np.ndarray, exposure: np.ndarray, totals: np.ndarray, rate_pred: np.ndarray, p: float
+) -> Dict[str, float]:
+    """Calculate and summarize metrics for a Tweedie model.
+
+    Computes the correctly weighted mean Tweedie deviance between true and
+    predicted rates, and compares the aggregate true and predicted totals.
+
+    Parameters
+    ----------
+    rate_true : np.ndarray
+        The true underlying rate (pure premium).
+    exposure : np.ndarray
+        The exposure for each observation.
+    totals : np.ndarray
+        The observed total amounts (unused in calculation but kept for context).
+    rate_pred : np.ndarray
+        The predicted rate from the model.
+    p : float
+        The Tweedie variance power used for the deviance calculation.
+
+    Returns
+    -------
+    Dict[str, float]
+        A dictionary of metrics: 'tweedie_dev', 'agg_true_totals',
+        'agg_pred_totals', and 'ratio'.
+    """
     sw = exposure ** (2 - p)  # GLM-correct rate weighting
     dev = mean_tweedie_deviance(rate_true, rate_pred, power=p, sample_weight=sw)
     agg_true = (rate_true * exposure).sum()

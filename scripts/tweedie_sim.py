@@ -14,7 +14,7 @@ Author: (you)
 """
 
 from __future__ import annotations
-import math
+import math, typing
 import warnings
 import numpy as np
 import pandas as pd
@@ -23,6 +23,10 @@ from numpy.random import default_rng
 from sklearn.model_selection import train_test_split
 from sklearn.linear_model import TweedieRegressor
 from sklearn.metrics import mean_squared_error
+
+if typing.TYPE_CHECKING:
+    from typing import List, Optional, Tuple
+
 
 # Try LightGBM (optional)
 try:
@@ -40,12 +44,28 @@ np.set_printoptions(suppress=True, linewidth=120)
 # Utilities: Tweedie pieces
 # -------------------------
 def half_tweedie_deviance(y: np.ndarray, mu: np.ndarray, p: float) -> np.ndarray:
-    """
-    Half Tweedie deviance with log link (matches sklearn's HalfTweedieLoss for p not in {0,1,2}).
+    """Calculate the half Tweedie deviance with a log link.
+
+    This matches scikit-learn's `HalfTweedieLoss` for p not in {0, 1, 2}.
     Returns element-wise loss (without constants in y for p in {0,1,2}).
+
     Domain assumptions for typical insurance use:
       - For 1 < p < 2: y >= 0, mu > 0
       - For p = 1, 2: handled by limits
+
+    Parameters
+    ----------
+    y : np.ndarray
+        The ground truth values.
+    mu : np.ndarray
+        The predicted mean values.
+    p : float
+        The Tweedie variance power.
+
+    Returns
+    -------
+    np.ndarray
+        The element-wise half Tweedie deviance.
     """
     eps = 1e-12
     y = np.asarray(y, dtype=float)
@@ -72,13 +92,31 @@ def half_tweedie_deviance(y: np.ndarray, mu: np.ndarray, p: float) -> np.ndarray
     return term3 - term2
 
 
-def tweedie_compound_poisson_gamma_params(mu: np.ndarray, phi: float, p: float):
-    """
-    For 1 < p < 2: map Tweedie(μ, φ, p) to compound Poisson–Gamma params:
+def tweedie_compound_poisson_gamma_params(
+    mu: np.ndarray, phi: float, p: float
+) -> Tuple[np.ndarray, float, np.ndarray]:
+    """Map Tweedie parameters to compound Poisson-Gamma parameters.
+
+    For a Tweedie distribution with 1 < p < 2, this function calculates the
+    parameters (λ, a, θ) for the equivalent compound Poisson-Gamma process.
       N ~ Poisson(λ), severities ~ Gamma(a, θ) (shape a, scale θ), total = sum_{k=1..N} S_k
     λ = μ^{2-p} / (φ (2-p))
     a = (2 - p) / (p - 1)
     θ = φ (p - 1) μ^{p - 1}
+
+    Parameters
+    ----------
+    mu : np.ndarray
+        Mean of the Tweedie distribution.
+    phi : float
+        Dispersion parameter of the Tweedie distribution.
+    p : float
+        Power parameter of the Tweedie distribution (must be in (1, 2)).
+
+    Returns
+    -------
+    Tuple[np.ndarray, float, np.ndarray]
+        A tuple containing the Poisson rate (lam), Gamma shape (a), and Gamma scale (theta).
     """
     if not (1.0 < p < 2.0):
         raise ValueError("Compound Poisson–Gamma mapping only valid for 1 < p < 2.")
@@ -89,10 +127,27 @@ def tweedie_compound_poisson_gamma_params(mu: np.ndarray, phi: float, p: float):
 
 
 def rng_tweedie_totals(mu: np.ndarray, phi: float, p: float, rng: np.random.Generator) -> np.ndarray:
-    """
-    Simulate totals Y ~ Tweedie(μ, φ, p) for insurance case 1 < p < 2 via compound Poisson–Gamma.
+    """Simulate totals from a Tweedie distribution.
+
+    For the insurance case 1 < p < 2, simulation is done via a compound Poisson–Gamma process.
     For p=1 or p=2, we use appropriate limits (Poisson and Gamma) for demonstration.
     Note: For production, consider a dedicated Tweedie RNG library if needed.
+
+    Parameters
+    ----------
+    mu : np.ndarray
+        The mean of the Tweedie distribution for each sample.
+    phi : float
+        The dispersion parameter.
+    p : float
+        The Tweedie power parameter. Supported values are p=1, p=2, and 1 < p < 2.
+    rng : np.random.Generator
+        A NumPy random number generator instance.
+
+    Returns
+    -------
+    np.ndarray
+        The simulated total values.
     """
     mu = np.asarray(mu, dtype=float)
     n = mu.shape[0]
@@ -130,14 +185,35 @@ def rng_tweedie_totals(mu: np.ndarray, phi: float, p: float, rng: np.random.Gene
 # -------------------------
 # Data generation
 # -------------------------
-def make_insurance_data(n=50_000, p_index=1.9, phi=0.8, n_features=6, seed=7):
-    """
-    Generate synthetic insurance-style data:
+def make_insurance_data(
+    n: int = 50_000, p_index: float = 1.9, phi: float = 0.8, n_features: int = 6, seed: int = 7
+) -> pd.DataFrame:
+    """Generate synthetic insurance-style data.
+
+    The process is as follows:
       - features X
       - exposure ω
       - rate μ_rate = exp(Xβ)
       - total mean μ_total = ω * μ_rate
       - totals Y ~ Tweedie(μ_total, φ, p)
+
+    Parameters
+    ----------
+    n : int, optional
+        Number of samples to generate, by default 50_000.
+    p_index : float, optional
+        Tweedie power index, by default 1.9.
+    phi : float, optional
+        Dispersion parameter for data generation, by default 0.8.
+    n_features : int, optional
+        Number of features to generate, by default 6.
+    seed : int, optional
+        Random seed for reproducibility, by default 7.
+
+    Returns
+    -------
+    pd.DataFrame
+        A DataFrame containing features, Exposure, Total claim amount, and Rate.
     """
     rng = default_rng(seed)
     X = rng.normal(size=(n, n_features))
@@ -163,8 +239,44 @@ def make_insurance_data(n=50_000, p_index=1.9, phi=0.8, n_features=6, seed=7):
 # -------------------------
 # Fitting helpers
 # -------------------------
-def fit_sklearn_tweedie_rates(df_train, df_test, feature_cols, p, alpha=0.1):
-    """scikit-learn: fit on rates with correct weights exposure**(2 - p)."""
+def fit_sklearn_tweedie_rates(
+    df_train: pd.DataFrame,
+    df_test: pd.DataFrame,
+    feature_cols: List[str],
+    p: float,
+    alpha: float = 0.1,
+) -> Tuple[
+    TweedieRegressor,
+    Tuple[np.ndarray, np.ndarray],
+    Tuple[np.ndarray, np.ndarray],
+    Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray],
+]:
+    """Fit a scikit-learn TweedieRegressor on rates with correct weights.
+
+    The correct sample weight for modeling rates is `exposure**(2 - p)`.
+
+    Parameters
+    ----------
+    df_train : pd.DataFrame
+        Training data.
+    df_test : pd.DataFrame
+        Test data.
+    feature_cols : List[str]
+        List of column names to use as features.
+    p : float
+        Tweedie power parameter.
+    alpha : float, optional
+        L2 regularization strength, by default 0.1.
+
+    Returns
+    -------
+    Tuple
+        A tuple containing:
+        - The fitted `TweedieRegressor` model.
+        - Predicted totals for train and test sets.
+        - Predicted rates for train and test sets.
+        - A tuple of raw data arrays (Xtr, Xte, rtr, rte, wtr, wte).
+    """
     Xtr = df_train[feature_cols].to_numpy()
     Xte = df_test[feature_cols].to_numpy()
     rtr = df_train["Rate"].to_numpy()
@@ -184,8 +296,38 @@ def fit_sklearn_tweedie_rates(df_train, df_test, feature_cols, p, alpha=0.1):
     return glm, (yhat_tr, yhat_te), (rhat_tr, rhat_te), (Xtr, Xte, rtr, rte, wtr, wte)
 
 
-def fit_lgbm_tweedie_totals_offset(df_train, df_test, feature_cols, p, num_boost_round=300, seed=13):
-    """LightGBM: totals + offset via init_score = log(exposure)."""
+def fit_lgbm_tweedie_totals_offset(
+    df_train: pd.DataFrame,
+    df_test: pd.DataFrame,
+    feature_cols: List[str],
+    p: float,
+    num_boost_round: int = 300,
+    seed: int = 13,
+) -> Tuple[Optional[lgb.Booster], Tuple[Optional[np.ndarray], Optional[np.ndarray]]]:
+    """Fit a LightGBM Tweedie model on totals with a log-exposure offset.
+
+    The offset is provided via `init_score = log(exposure)`.
+
+    Parameters
+    ----------
+    df_train : pd.DataFrame
+        Training data.
+    df_test : pd.DataFrame
+        Test data.
+    feature_cols : List[str]
+        List of column names to use as features.
+    p : float
+        Tweedie power parameter.
+    num_boost_round : int, optional
+        Number of boosting rounds, by default 300.
+    seed : int, optional
+        Random seed for reproducibility, by default 13.
+
+    Returns
+    -------
+    Tuple[Optional[lgb.Booster], Tuple[Optional[np.ndarray], Optional[np.ndarray]]]
+        The fitted model and predicted totals for train and test sets. Returns None if LightGBM is not available.
+    """
     if not LGB_AVAILABLE:
         return None, (None, None)
 
@@ -223,8 +365,42 @@ def fit_lgbm_tweedie_totals_offset(df_train, df_test, feature_cols, p, num_boost
     return gbm, (yhat_tr, yhat_te)
 
 
-def fit_lgbm_tweedie_rates_weights(df_train, df_test, feature_cols, p, num_boost_round=300, seed=13):
-    """LightGBM: rates + weights exposure**(2 - p)."""
+def fit_lgbm_tweedie_rates_weights(
+    df_train: pd.DataFrame,
+    df_test: pd.DataFrame,
+    feature_cols: List[str],
+    p: float,
+    num_boost_round: int = 300,
+    seed: int = 13,
+) -> Tuple[
+    Optional[lgb.Booster],
+    Tuple[Optional[np.ndarray], Optional[np.ndarray]],
+    Tuple[Optional[np.ndarray], Optional[np.ndarray]],
+]:
+    """Fit a LightGBM Tweedie model on rates with correct weights.
+
+    The model is trained on rates with `sample_weight = exposure**(2 - p)`.
+
+    Parameters
+    ----------
+    df_train : pd.DataFrame
+        Training data.
+    df_test : pd.DataFrame
+        Test data.
+    feature_cols : List[str]
+        List of column names to use as features.
+    p : float
+        Tweedie power parameter.
+    num_boost_round : int, optional
+        Number of boosting rounds, by default 300.
+    seed : int, optional
+        Random seed for reproducibility, by default 13.
+
+    Returns
+    -------
+    Tuple
+        The fitted model, predicted totals (train/test), and predicted rates (train/test). Returns Nones if LightGBM is not available.
+    """
     if not LGB_AVAILABLE:
         return None, (None, None), (None, None)
 
@@ -268,8 +444,31 @@ def fit_lgbm_tweedie_rates_weights(df_train, df_test, feature_cols, p, num_boost
 # -------------------------
 # Experiments / checks
 # -------------------------
-def evaluate_deviance(y_true, y_hat, p, sample_weight=None, name=""):
-    """Return average half Tweedie deviance (weighted)."""
+def evaluate_deviance(
+    y_true: np.ndarray, y_hat: np.ndarray, p: float, sample_weight: Optional[np.ndarray] = None, name: str = ""
+) -> float:
+    """Calculate the average half Tweedie deviance.
+
+    If sample weights are provided, a weighted average is computed.
+
+    Parameters
+    ----------
+    y_true : np.ndarray
+        Ground truth target values.
+    y_hat : np.ndarray
+        Predicted target values.
+    p : float
+        Tweedie power parameter.
+    sample_weight : Optional[np.ndarray], optional
+        Sample weights, by default None.
+    name : str, optional
+        An optional name to print with the result, by default "".
+
+    Returns
+    -------
+    float
+        The (weighted) average half Tweedie deviance.
+    """
     loss = half_tweedie_deviance(y_true, np.maximum(y_hat, 1e-12), p)
     if sample_weight is None:
         val = float(np.mean(loss))
@@ -342,8 +541,23 @@ if LGB_AVAILABLE:
     # -------------------------
     # Equivalence checks (numerical)
     # -------------------------
-    # Compare predictions across the three exact encodings on the same split (test set)
-    def rel_rmse(a, b):
+    def rel_rmse(a: np.ndarray, b: np.ndarray) -> float:
+        """Calculate the relative root mean squared error.
+
+        This provides a scale-free measure of the difference between two arrays.
+
+        Parameters
+        ----------
+        a : np.ndarray
+            First array of predictions.
+        b : np.ndarray
+            Second array of predictions.
+
+        Returns
+        -------
+        float
+            The relative RMSE value.
+        """
         denom = np.maximum(np.abs(a) + np.abs(b), 1e-6)
         return math.sqrt(np.mean(((a - b) / denom) ** 2))
 

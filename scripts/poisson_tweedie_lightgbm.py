@@ -31,6 +31,7 @@ from __future__ import annotations
 import warnings
 import numpy as np
 import pandas as pd
+from typing import Dict, Optional, Tuple
 import matplotlib
 matplotlib.use("Agg")  # Use a non-interactive backend to avoid tkinter issues
 import matplotlib.pyplot as plt
@@ -80,8 +81,19 @@ np.random.seed(RANDOM_STATE)
 # ## Data loading utilities
 
 # %%
-def load_mtpl2(n_samples=None):
-    """Fetch French MTPL (freq + sev), aggregate severity to totals, clean columns."""
+def load_mtpl2(n_samples: Optional[int] = None) -> pd.DataFrame:
+    """Fetch French MTPL (freq + sev), aggregate severity to totals, clean columns.
+
+    Parameters
+    ----------
+    n_samples : Optional[int], optional
+        Number of samples to load, by default None (all samples).
+
+    Returns
+    -------
+    pd.DataFrame
+        The cleaned DataFrame with aggregated totals.
+    """
     # freMTPL2freq
     df_freq = fetch_openml(data_id=41214, as_frame=True).data
     df_freq["IDpol"] = df_freq["IDpol"].astype(int)
@@ -100,8 +112,21 @@ def load_mtpl2(n_samples=None):
     return df.iloc[:n_samples]
 
 
-def basic_cleaning(df):
-    """Same cleaning logic as sklearn example, plus derived targets."""
+def basic_cleaning(df: pd.DataFrame) -> pd.DataFrame:
+    """Apply cleaning logic and derive targets.
+
+    Same cleaning logic as sklearn example, plus derived targets.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        The input DataFrame to clean.
+
+    Returns
+    -------
+    pd.DataFrame
+        The cleaned DataFrame with derived targets.
+    """
     df = df.copy()
     df["ClaimNb"] = df["ClaimNb"].clip(upper=4)
     df["Exposure"] = df["Exposure"].clip(upper=1)
@@ -118,7 +143,17 @@ def basic_cleaning(df):
 # ## Feature engineering
 
 # %%
-def build_column_transformer():
+def build_column_transformer() -> ColumnTransformer:
+    """Build a column transformer for preprocessing features.
+
+    Creates a ColumnTransformer with binning for numeric features,
+    one-hot encoding for categorical features, and log scaling for density.
+
+    Returns
+    -------
+    ColumnTransformer
+        The configured column transformer.
+    """
     # Make OHE robust to unseen categories in test
     ohe = OneHotEncoder(handle_unknown="ignore")
     log_scale_transformer = make_pipeline(
@@ -131,9 +166,6 @@ def build_column_transformer():
                 KBinsDiscretizer(n_bins=10, encode="onehot-dense", strategy="quantile"),
                 # Use quantile binning to handle skewed distributions like age.
                 # Each bin will contain approximately the same number of samples.
-                KBinsDiscretizer(
-                    n_bins=10, encode="onehot-dense", strategy="quantile"
-                ),
                 ["VehAge", "DrivAge"],
             ),
             ("onehot_categorical", ohe, ["VehBrand", "VehPower", "VehGas", "Region", "Area"]),
@@ -148,8 +180,25 @@ def build_column_transformer():
 # ## Plot helpers (rate-level calibration, Lorenz)
 
 # %%
-def _get_aggregated_rates(df, feature, weight_name, rate_values):
-    """Helper to aggregate rates by a feature, exposure-weighted."""
+def _get_aggregated_rates(df: pd.DataFrame, feature: str, weight_name: str, rate_values: np.ndarray) -> pd.DataFrame:
+    """Aggregate rates by a feature, exposure-weighted.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        The DataFrame containing the data.
+    feature : str
+        The feature to group by.
+    weight_name : str
+        The column name for weights.
+    rate_values : np.ndarray
+        The rate values to aggregate.
+
+    Returns
+    -------
+    pd.DataFrame
+        The aggregated DataFrame with rates.
+    """
     w = df[weight_name].to_numpy()
     tmp = pd.DataFrame({
         feature: df[feature].to_numpy(),
@@ -161,7 +210,23 @@ def _get_aggregated_rates(df, feature, weight_name, rate_values):
     return grp
 
 
-def lorenz_curve(y_true_rate, y_pred_rate, exposure):
+def lorenz_curve(y_true_rate: np.ndarray, y_pred_rate: np.ndarray, exposure: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+    """Compute the Lorenz curve for exposure-weighted rates.
+
+    Parameters
+    ----------
+    y_true_rate : np.ndarray
+        True rate values.
+    y_pred_rate : np.ndarray
+        Predicted rate values.
+    exposure : np.ndarray
+        Exposure values.
+
+    Returns
+    -------
+    Tuple[np.ndarray, np.ndarray]
+        Cumulative exposure and cumulative true rates.
+    """
     y_true_rate = np.asarray(y_true_rate)
     y_pred_rate = np.asarray(y_pred_rate)
     exposure = np.asarray(exposure)
@@ -177,10 +242,25 @@ def lorenz_curve(y_true_rate, y_pred_rate, exposure):
 # ## Metrics
 
 # %%
-def d2_explained(y_true_rate, y_pred_rate, sample_weight):
-    """
+def d2_explained(y_true_rate: np.ndarray, y_pred_rate: np.ndarray, sample_weight: Optional[np.ndarray]) -> float:
+    """Compute D^2 explained using Tweedie deviance.
+
     D^2 explained (GLM deviance analogue) computed from mean Tweedie deviance
     at the modeling power P; we use the same sample_weight for both terms.
+
+    Parameters
+    ----------
+    y_true_rate : np.ndarray
+        True rate values.
+    y_pred_rate : np.ndarray
+        Predicted rate values.
+    sample_weight : Optional[np.ndarray]
+        Sample weights.
+
+    Returns
+    -------
+    float
+        The D^2 explained value.
     """
     sw = None if sample_weight is None else np.asarray(sample_weight)
     dev = mean_tweedie_deviance(y_true_rate, y_pred_rate, power=P, sample_weight=sw)
@@ -189,12 +269,27 @@ def d2_explained(y_true_rate, y_pred_rate, sample_weight):
     return 1.0 - (dev / dev_null if dev_null > 0 else np.nan)
 
 
-def evaluate_models_table(df_test, pred_dict, weights_for_eval=("Exposure", "Exposure_2mp")):
-    """
+def evaluate_models_table(df_test: pd.DataFrame, pred_dict: Dict[str, np.ndarray], weights_for_eval: Tuple[str, ...] = ("Exposure", "Exposure_2mp")) -> pd.DataFrame:
+    """Build a table of metrics for each model under different weightings.
+
     Build a tidy table of metrics for each model under two evaluation weightings:
     - Exposure
     - Exposure ** (2 - p)
     Metrics on rates: MAE, MSE, mean Tweedie dev (power=P), and D^2 explained.
+
+    Parameters
+    ----------
+    df_test : pd.DataFrame
+        Test data.
+    pred_dict : Dict[str, np.ndarray]
+        Dictionary of model predictions.
+    weights_for_eval : Tuple[str, ...], optional
+        Weighting schemes, by default ("Exposure", "Exposure_2mp").
+
+    Returns
+    -------
+    pd.DataFrame
+        Table of metrics.
     """
     rows = []
     y_true_rate = df_test["PurePremium"].to_numpy()
@@ -222,9 +317,24 @@ def evaluate_models_table(df_test, pred_dict, weights_for_eval=("Exposure", "Exp
     res = pd.DataFrame(rows).set_index(["eval_weight", "model"])
     return res
 
-def d2_poisson_explained(y_true_rate, y_pred_rate, sample_weight):
-    """
+def d2_poisson_explained(y_true_rate: np.ndarray, y_pred_rate: np.ndarray, sample_weight: Optional[np.ndarray]) -> float:
+    """Compute D^2 explained using Poisson deviance.
+
     D^2 explained for Poisson deviance, evaluated on rates with exposure as sample_weight.
+
+    Parameters
+    ----------
+    y_true_rate : np.ndarray
+        True rate values.
+    y_pred_rate : np.ndarray
+        Predicted rate values.
+    sample_weight : Optional[np.ndarray]
+        Sample weights.
+
+    Returns
+    -------
+    float
+        The D^2 explained value.
     """
     sw = None if sample_weight is None else np.asarray(sample_weight)
     dev = mean_poisson_deviance(y_true_rate, y_pred_rate, sample_weight=sw)
@@ -233,11 +343,24 @@ def d2_poisson_explained(y_true_rate, y_pred_rate, sample_weight):
     return 1.0 - (dev / dev_null if dev_null > 0 else np.nan)
 
 
-def evaluate_frequency_models_table(df_test, pred_dict):
-    """
+def evaluate_frequency_models_table(df_test: pd.DataFrame, pred_dict: Dict[str, np.ndarray]) -> pd.DataFrame:
+    """Build a table of metrics for frequency models.
+
     Build a tidy table of metrics for frequency models.
     Evaluation is always exposure-weighted.
     Metrics on rates: MAE, MSE, mean Poisson dev, and D^2 explained.
+
+    Parameters
+    ----------
+    df_test : pd.DataFrame
+        Test data.
+    pred_dict : Dict[str, np.ndarray]
+        Dictionary of model predictions.
+
+    Returns
+    -------
+    pd.DataFrame
+        Table of metrics.
     """
     rows = []
     y_true_rate = df_test["Frequency"].to_numpy()
@@ -261,12 +384,31 @@ def evaluate_frequency_models_table(df_test, pred_dict):
 # ## Fitting: sklearn TweedieRegressor (rates)
 
 # %%
-def fit_sklearn_tweedie_rates(X_tr, X_te, df_train, df_test, weight_scheme):
-    """
+def fit_sklearn_tweedie_rates(X_tr: np.ndarray, X_te: np.ndarray, df_train: pd.DataFrame, df_test: pd.DataFrame, weight_scheme: str) -> Tuple[str, TweedieRegressor, np.ndarray, np.ndarray]:
+    """Fit scikit-learn TweedieRegressor with different weight schemes.
+
     weight_scheme in {"exact", "poisson"}:
       - "exact":   s = Exposure ** (2 - P)
       - "poisson": s = Exposure
-    Returns (model, y_pred_rate_train, y_pred_rate_test)
+    Returns (tag, model, y_pred_rate_train, y_pred_rate_test)
+
+    Parameters
+    ----------
+    X_tr : np.ndarray
+        Training features.
+    X_te : np.ndarray
+        Test features.
+    df_train : pd.DataFrame
+        Training data.
+    df_test : pd.DataFrame
+        Test data.
+    weight_scheme : str
+        Weight scheme ("exact" or "poisson").
+
+    Returns
+    -------
+    Tuple[str, TweedieRegressor, np.ndarray, np.ndarray]
+        Tag, model, train predictions, test predictions.
     """
     if weight_scheme == "exact":
         wtr = (df_train["Exposure"].to_numpy()) ** (2.0 - P)
@@ -292,13 +434,30 @@ def fit_sklearn_tweedie_rates(X_tr, X_te, df_train, df_test, weight_scheme):
 # ## Fitting: LightGBM Tweedie
 
 # %%
-def lgb_offset(X_tr, X_te, df_train, df_test):
-    """
+def lgb_offset(X_tr: np.ndarray, X_te: np.ndarray, df_train: pd.DataFrame, df_test: pd.DataFrame) -> Tuple[Optional[lgb.Booster], Tuple[Optional[np.ndarray], Optional[np.ndarray]]]:
+    """Fit LightGBM with totals and offset.
+
     LightGBM: totals + offset
       label = ClaimAmount
       init_score = log(Exposure)
       objective = tweedie, tweedie_variance_power=P
-    Returns (model, yhat_tr_rate, yhat_te_rate)
+    Returns (model, (yhat_tr_rate, yhat_te_rate))
+
+    Parameters
+    ----------
+    X_tr : np.ndarray
+        Training features.
+    X_te : np.ndarray
+        Test features.
+    df_train : pd.DataFrame
+        Training data.
+    df_test : pd.DataFrame
+        Test data.
+
+    Returns
+    -------
+    Tuple[Optional[lgb.Booster], Tuple[Optional[np.ndarray], Optional[np.ndarray]]]
+        Model and predictions.
     """
     if not LGB_AVAILABLE:
         return None, None, None
@@ -339,12 +498,31 @@ def lgb_offset(X_tr, X_te, df_train, df_test):
 
     return gbm, yhat_tr_rate, yhat_te_rate
 
-def fit_lgb_rates(X_tr, X_te, df_train, df_test, weight_scheme):
-    """
+def fit_lgb_rates(X_tr: np.ndarray, X_te: np.ndarray, df_train: pd.DataFrame, df_test: pd.DataFrame, weight_scheme: str) -> Tuple[str, Optional[lgb.Booster], np.ndarray, np.ndarray]:
+    """Fit LightGBM with rates and weights.
+
     LightGBM: rates + weights
       label = PurePremium
       weight = Exposure ** (2 - P)  (exact)  OR  Exposure (poisson-style)
-    Returns (model, yhat_tr_rate, yhat_te_rate)
+    Returns (tag, model, yhat_tr_rate, yhat_te_rate)
+
+    Parameters
+    ----------
+    X_tr : np.ndarray
+        Training features.
+    X_te : np.ndarray
+        Test features.
+    df_train : pd.DataFrame
+        Training data.
+    df_test : pd.DataFrame
+        Test data.
+    weight_scheme : str
+        Weight scheme.
+
+    Returns
+    -------
+    Tuple[str, Optional[lgb.Booster], np.ndarray, np.ndarray]
+        Tag, model, train predictions, test predictions.
     """
     if not LGB_AVAILABLE:
         return None, None, None
@@ -387,12 +565,29 @@ def fit_lgb_rates(X_tr, X_te, df_train, df_test, weight_scheme):
 # ## Fitting: Poisson Models for Frequency
 
 # %%
-def fit_sklearn_poisson_rates(X_tr, X_te, df_train, df_test):
-    """
+def fit_sklearn_poisson_rates(X_tr: np.ndarray, X_te: np.ndarray, df_train: pd.DataFrame, df_test: pd.DataFrame) -> Tuple[str, PoissonRegressor, np.ndarray, np.ndarray]:
+    """Fit scikit-learn PoissonRegressor.
+
     sklearn PoissonRegressor: rates + weights
       label = Frequency
       sample_weight = Exposure
-    Returns (model, y_pred_rate_train, y_pred_rate_test)
+    Returns (tag, model, y_pred_rate_train, y_pred_rate_test)
+
+    Parameters
+    ----------
+    X_tr : np.ndarray
+        Training features.
+    X_te : np.ndarray
+        Test features.
+    df_train : pd.DataFrame
+        Training data.
+    df_test : pd.DataFrame
+        Test data.
+
+    Returns
+    -------
+    Tuple[str, PoissonRegressor, np.ndarray, np.ndarray]
+        Tag, model, train predictions, test predictions.
     """
     tag = "sklearn_poisson_rate_w=exp"
     wtr = df_train["Exposure"].to_numpy()
@@ -405,14 +600,31 @@ def fit_sklearn_poisson_rates(X_tr, X_te, df_train, df_test):
     return tag, glm, yhat_tr_rate, yhat_te_rate
 
 
-def fit_lgb_poisson_offset_counts(X_tr, X_te, df_train, df_test):
-    """
+def fit_lgb_poisson_offset_counts(X_tr: np.ndarray, X_te: np.ndarray, df_train: pd.DataFrame, df_test: pd.DataFrame) -> Tuple[Optional[str], Optional[lgb.Booster], Optional[np.ndarray], Optional[np.ndarray]]:
+    """Fit LightGBM Poisson with offset.
+
     LightGBM (Poisson) with log-exposure offset via init_score.
       - label = ClaimNb (counts)
       - init_score = log(Exposure)
       - objective = 'poisson'
       - predict() returns RATE per unit exposure (not counts)
     Returns: (tag, model, yhat_tr_rate, yhat_te_rate)
+
+    Parameters
+    ----------
+    X_tr : np.ndarray
+        Training features.
+    X_te : np.ndarray
+        Test features.
+    df_train : pd.DataFrame
+        Training data.
+    df_test : pd.DataFrame
+        Test data.
+
+    Returns
+    -------
+    Tuple[Optional[str], Optional[lgb.Booster], Optional[np.ndarray], Optional[np.ndarray]]
+        Tag, model, train predictions, test predictions.
     """
     if not LGB_AVAILABLE:
         return None, None, None, None
@@ -459,13 +671,30 @@ def fit_lgb_poisson_offset_counts(X_tr, X_te, df_train, df_test):
     return tag, gbm, yhat_tr_rate, yhat_te_rate
 
 
-def fit_lgb_poisson_rates_weights(X_tr, X_te, df_train, df_test):
-    """
+def fit_lgb_poisson_rates_weights(X_tr: np.ndarray, X_te: np.ndarray, df_train: pd.DataFrame, df_test: pd.DataFrame) -> Tuple[Optional[str], Optional[lgb.Booster], Optional[np.ndarray], Optional[np.ndarray]]:
+    """Fit LightGBM Poisson with rates and weights.
+
     LightGBM: rates + weights
       label = Frequency
       weight = Exposure
       objective = poisson
-    Returns (model, yhat_tr_rate, yhat_te_rate)
+    Returns (tag, model, yhat_tr_rate, yhat_te_rate)
+
+    Parameters
+    ----------
+    X_tr : np.ndarray
+        Training features.
+    X_te : np.ndarray
+        Test features.
+    df_train : pd.DataFrame
+        Training data.
+    df_test : pd.DataFrame
+        Test data.
+
+    Returns
+    -------
+    Tuple[Optional[str], Optional[lgb.Booster], Optional[np.ndarray], Optional[np.ndarray]]
+        Tag, model, train predictions, test predictions.
     """
     if not LGB_AVAILABLE:
         return None, None, None, None

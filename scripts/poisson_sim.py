@@ -1,6 +1,7 @@
 # %%
 import pandas as pd
 import numpy as np
+from typing import Tuple
 import lightgbm as lgb
 from scipy.stats import poisson
 
@@ -37,7 +38,25 @@ var_impact = pd.DataFrame({
 })
 
 # %%
-def generate_claim_counts(dt, var_impact):
+def generate_claim_counts(dt: pd.DataFrame, var_impact: pd.DataFrame) -> pd.DataFrame:
+    """Generate claim counts based on exposure and base lambda.
+
+    Merges the base data with feature impacts to get a base lambda,
+    calculates the expected claim count (lambda) as `expos * lambda_base`,
+    and then simulates the actual claim counts from a Poisson distribution.
+
+    Parameters
+    ----------
+    dt : pd.DataFrame
+        The input DataFrame with features and exposure.
+    var_impact : pd.DataFrame
+        A DataFrame mapping feature combinations to a `lambda_base`.
+
+    Returns
+    -------
+    pd.DataFrame
+        The input DataFrame augmented with lambda, claim_count, and claim_count_adjusted.
+    """
     dt = dt.merge(var_impact, on=['var1', 'var2'])
     dt['lambda'] = dt['expos'] * dt['lambda_base']
     dt['claim_count'] = [poisson.rvs(mu) for mu in dt['lambda']]
@@ -62,7 +81,22 @@ print(data_easy.groupby(['var1', 'var2', 'expos', 'lambda'])['claim_count'].mean
 # # SOLUTION 1: init_score
 # %%
 # SOLUTION 1: init_score
-def solution_1_predict(data_curr):
+def solution_1_predict(data_curr: pd.DataFrame) -> np.ndarray:
+    """Train a Poisson LightGBM model using log(exposure) as an offset.
+
+    The offset is passed via the `init_score` parameter. `boost_from_average`
+    is set to False, which is crucial for offset models.
+
+    Parameters
+    ----------
+    data_curr : pd.DataFrame
+        The training data, containing features, 'claim_count', and 'expos'.
+
+    Returns
+    -------
+    np.ndarray
+        The predicted rates (per unit of exposure).
+    """
     data_curr_recoded = data_curr[['var1', 'var2']].copy()
     for col in ['var1', 'var2']:
         data_curr_recoded[col] = pd.Categorical(data_curr_recoded[col]).codes
@@ -97,7 +131,22 @@ data_mod['sol_1_predict_raw'] = predicted_counts_mod
 # # SOLUTION 1B: Tweedie
 # %%
 # SOLUTION 1B: Tweedie
-def solution_1b_predict(data_curr):
+def solution_1b_predict(data_curr: pd.DataFrame) -> np.ndarray:
+    """Train a Tweedie(p=1) LightGBM model using log(exposure) as an offset.
+
+    This is equivalent to the Poisson model in Solution 1. The offset is
+    passed via `init_score`. `boost_from_average` is set to False.
+
+    Parameters
+    ----------
+    data_curr : pd.DataFrame
+        The training data, containing features, 'claim_count', and 'expos'.
+
+    Returns
+    -------
+    np.ndarray
+        The predicted totals. For p=1, this is equivalent to predicted counts.
+    """
     data_curr_recoded = data_curr[['var1', 'var2']].copy()
     for col in ['var1', 'var2']:
         data_curr_recoded[col] = pd.Categorical(data_curr_recoded[col]).codes
@@ -133,7 +182,23 @@ data_mod['sol_1b_predict_raw'] = predicted_counts_mod_1b / np.fmax(data_mod['exp
 # # SOLUTION 2: Adjusted claim counts with weights
 # %%
 # SOLUTION 2: Adjusted claim counts with weights
-def solution_2_predict(data_curr):
+def solution_2_predict(data_curr: pd.DataFrame) -> np.ndarray:
+    """Train a Poisson LightGBM model on rates with exposure as weights.
+
+    The label is the rate (`claim_count / expos`), and the sample weights
+    are set to the exposure. This is the mathematically equivalent "weights"
+    approach to using an offset.
+
+    Parameters
+    ----------
+    data_curr : pd.DataFrame
+        The training data, containing features and pre-calculated 'claim_count_adjusted' and 'expos'.
+
+    Returns
+    -------
+    np.ndarray
+        The predicted rates.
+    """
     data_curr_recoded = data_curr[['var1', 'var2']].copy()
     for col in ['var1', 'var2']:
         data_curr_recoded[col] = pd.Categorical(data_curr_recoded[col]).codes
@@ -164,11 +229,21 @@ data_mod['sol_2_predict'] = data_mod['sol_2_predict_raw'] * data_mod['expos']   
 # %% [markdown]
 # # SOLUTION 3: Custom objective function
 # %%
-def solution_3_predict(data_curr):
-    """
-    Implements the Poisson model with a custom objective function.
+def solution_3_predict(data_curr: pd.DataFrame) -> np.ndarray:
+    """Train a Poisson LightGBM model with a custom objective function.
+
     The exposure is handled by adding log(exposure) to the model's raw prediction
     inside the objective function to calculate the full linear predictor.
+
+    Parameters
+    ----------
+    data_curr : pd.DataFrame
+        The training data, containing features, 'claim_count', and 'expos'.
+
+    Returns
+    -------
+    np.ndarray
+        The predicted rates (per unit of exposure).
     """
     data_curr_recoded = data_curr[['var1', 'var2']].copy()
     for col in ['var1', 'var2']:
@@ -178,11 +253,20 @@ def solution_3_predict(data_curr):
     # which is cleaner than using a global variable.
     exposure_values = data_curr['expos'].values
 
-    def custom_poisson_obj(y_pred, data):
-        """
-        Custom Poisson objective function with exposure offset.
-        y_pred: raw score from the booster (F(x)).
-        data: the lgb.Dataset object, from which we get the labels.
+    def custom_poisson_obj(y_pred: np.ndarray, data: lgb.Dataset) -> Tuple[np.ndarray, np.ndarray]:
+        """Custom Poisson objective function with exposure offset.
+
+        Parameters
+        ----------
+        y_pred : np.ndarray
+            Raw score from the booster (F(x)).
+        data : lgb.Dataset
+            The lgb.Dataset object, from which we get the labels.
+
+        Returns
+        -------
+        Tuple[np.ndarray, np.ndarray]
+            Gradient and Hessian of the Poisson loss.
         """
         y_true = data.get_label()
         # Add the log-exposure offset to get the full linear predictor (eta)
