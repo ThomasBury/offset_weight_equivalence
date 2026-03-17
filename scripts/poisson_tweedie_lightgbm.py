@@ -348,10 +348,11 @@ def basic_cleaning(df: pd.DataFrame) -> pd.DataFrame:
     df["ClaimAmount"] = df["ClaimAmount"].clip(upper=200_000)
     df.loc[(df["ClaimAmount"] == 0) & (df["ClaimNb"] >= 1), "ClaimNb"] = 0
 
-    # Derived targets (rates)
-    df["PurePremium"] = df["ClaimAmount"] / df["Exposure"]
-    df["Frequency"] = df["ClaimNb"] / df["Exposure"]
-    df["AvgClaimAmount"] = df["ClaimAmount"] / np.fmax(df["ClaimNb"], 1)
+    # Derived rate targets use a small floor to avoid exploding values when
+    # exposure is positive but extremely close to zero.
+    exposure_safe = np.fmax(df["Exposure"].to_numpy(dtype=float), EXPOSURE_FLOOR)
+    df["PurePremium"] = df["ClaimAmount"] / exposure_safe
+    df["Frequency"] = df["ClaimNb"] / exposure_safe
     return df
 
 # %% [markdown]
@@ -1235,7 +1236,7 @@ y_true_counts = df_test["ClaimNb"].to_numpy().sum()
 
 agg_rows_freq = []
 for model_name, pred_rate in pred_freq_test.items():
-    pred_counts = np.sum(exposure_test * pred_rate)
+    pred_counts = np.sum(exposure_test_freq * pred_rate)
     agg_rows_freq.append((model_name, pred_counts))
 
 agg_df_freq = build_aggregate_comparison_df(
@@ -1264,7 +1265,7 @@ for label, y_pred_freq in pred_freq_test.items():
     ax.plot(cx, cy, label=f"{label} (Gini={gini:.3f})")
 
 # Oracle
-cx, cy = lorenz_curve(y_true_freq, y_true_freq, exposure_test)
+cx, cy = lorenz_curve(y_true_freq, y_true_freq, exposure_test_freq)
 gini = 1 - 2 * auc(cx, cy)
 ax.plot(cx, cy, linestyle="-.", label=f"Oracle (Gini={gini:.3f})")
 
