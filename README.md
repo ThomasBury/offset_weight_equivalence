@@ -1,188 +1,264 @@
-# Offset–Weight Equivalence in Poisson and Tweedie Regression (GLM/GBM)
+# Offset-Weight Equivalence in Poisson and Tweedie Regression
 
-This repository demonstrates, with code and figures, the equivalence between two common ways to encode exposure in insurance modeling:
+This repository is a tutorial for a specific modeling question that shows up constantly in non-life insurance work:
 
-- Offset formulation: model totals with a log-exposure offset.
-- Rates + weights formulation: model per-exposure rates with appropriate sample weights.
+When a target is observed over different exposures, should you
 
-It covers both Poisson (frequency) and Tweedie (aggregate cost) models using scikit-learn and LightGBM, and includes simulation and real-data experiments.
+- model totals with a log-exposure offset, or
+- model rates with sample weights?
 
-## Key idea (short)
+For Poisson models, the exact rate weight is `omega`.
+For Tweedie models with log link and variance `V(mu) = mu^p`, the exact rate weight is `omega^(2-p)`.
 
-- Poisson with log link: either model counts with an offset log(ω) or model rates with sample_weight = ω. Both give identical score and Hessian, hence the same estimator.
-- Tweedie with log link and variance V(μ) = μ^p: either model totals with an offset log(ω), or model rates with sample_weight = ω^(2−p). Again, both produce identical estimating equations under the usual GLM conditions.
+This repo explains the math, then shows the consequence in code with `scikit-learn` and `LightGBM`. For the mathematical review, see the slide deck in [docs/offset_and_weight_equivalence.pdf](docs/offset_and_weight_equivalence.pdf).
 
-For precise statements and derivations, see [PDF](.\docs\offset_and_weight_equivalence.pdf).
+## Scripts At A Glance
 
-## Core terms (beginner glossary)
+- [scripts/poisson_sim.py](scripts/poisson_sim.py)
+  Minimal Poisson toy example: offset, weighted rates, and a custom objective all agree.
+- [scripts/tweedie_sim.py](scripts/tweedie_sim.py)
+  Synthetic Tweedie example: shows why the exact rate weight is `exposure^(2-p)`.
+- [scripts/tweedie_poisson_offset_from_average.py](scripts/tweedie_poisson_offset_from_average.py)
+  LightGBM caveat demo: isolates the effect of `boost_from_average` when using offsets.
+- [scripts/poisson_tweedie_lightgbm.py](scripts/poisson_tweedie_lightgbm.py)
+  Full real-data tutorial: compares exact and heuristic encodings on French MTPL data.
 
-- Non-life insurance pricing: pricing for property & casualty (e.g., auto, home). We model expected claims cost rather than final premium (which adds expenses, profit, taxes).
-- Exposure (ω): the amount of risk observed (e.g., policy-years). Partial-term policies have ω < 1. Exposure scales both expected counts and totals.
-- Frequency: expected number of claims per unit exposure. Often modeled with a Poisson GLM.
-- Severity: size of an individual claim. Often modeled with a Gamma GLM. Aggregate cost combines frequency and severity.
-- Pure premium (rate): expected claim amount per unit exposure; equivalently Total/Exposure. This is the modeling target before adding loadings.
-- Totals vs rates: Total = Exposure × Rate. You can model totals with an offset or rates with weights; this repo shows how they match.
-- GLM (generalized linear model): models a transformed mean with a link function, e.g., log(mean) = Xβ.
-- GBM (gradient boosting machine): ensemble of decision trees trained on gradients; LightGBM is a popular GBM library used here.
-- Log link: link function using log(mean). With a log link, multiplying the mean by ω adds a constant log(ω) to the linear predictor, enabling offsets.
-- Offset: a known additive term in the linear predictor (here log(ω)). Lets the model learn rates while predictions scale correctly to totals.
-- Sample weight: per-row weight used during fitting. For Poisson rates use weight = ω; for Tweedie rates use weight = ω^(2−p).
-- Tweedie regression: GLM family with variance Var(Y) = φ·μ^p. Special cases: p=1 Poisson (frequency), p=2 Gamma (severity), 1<p<2 compound Poisson–Gamma (aggregate claims).
-- Hessian: matrix of second derivatives of the loss; used by optimizers/GBMs. The offset and weighted-rate encodings yield the same gradients/Hessians.
-- Calibration plot: compares observed vs predicted rates across bins of a feature; good models track the observed curve.
-- Lorenz curve / Gini: ranks risks by predicted rate and plots cumulative share; higher Gini indicates stronger segmentation.
+## Who This Is For
 
-## Repository layout
+This tutorial is a good fit if you are:
 
-- scripts/
-  - poisson_sim.py — synthetic Poisson example: offset vs weighted rates equivalence, incl. LightGBM variants.
-  - tweedie_sim.py — synthetic Tweedie example (1 < p ≤ 2): equivalence checks across implementations.
-  - poisson_tweedie_lightgbm.py — real-data experiment (French MTPL: freMTPL2) comparing scikit-learn and LightGBM encodings; saves Lorenz and calibration plots.
-  - tweedie_poisson_offset_from_average.py — empirical check of LightGBM’s boost_from_average interaction with offsets.
-- docs/
-  - nonlife_regression.tex — slides explaining the mathematics of the equivalence and practical caveats.
-  - offset_and_weight_equivalence.pdf — (if present) compiled slides.
-- figures/ — generated figures (created when running scripts that save plots).
-- pyproject.toml — Python package metadata and runtime dependencies.
-- uv.lock — lockfile for reproducible installs with uv.
+- a pricing or actuarial practitioner working with exposure, claim counts, or pure premium,
+- a data scientist moving from generic ML toward insurance GLMs and GBMs,
+- a student who understands basic regression but wants the offset vs weight question made concrete,
+- a LightGBM user who wants to know when `init_score` is a true offset and when it is not enough by itself.
 
-Note: Some duplicate or misspelled script names may exist at the repository root; use the scripts/ versions as authoritative.
+This repo is probably not the best starting point if you are looking for a general introduction to GLMs from scratch. It is focused on one narrow but important modeling equivalence.
 
-## Quick start (recommended paths)
+## What You Will Learn
 
-First, clone the repository to your local machine and navigate into the project directory:
+By the end, you should be able to answer all of these clearly:
+
+- Why Poisson counts with `offset = log(exposure)` and Poisson rates with `sample_weight = exposure` are equivalent.
+- Why the Tweedie analogue is not `sample_weight = exposure`, but `sample_weight = exposure^(2-p)`.
+- Why `sample_weight = exposure` is only a heuristic for Tweedie when `p != 1`.
+- Why LightGBM needs special care with `boost_from_average` when using offsets.
+- How to reconstruct totals correctly from a rate model.
+
+## Fastest Path Through The Repo
+
+If you only want the best onboarding path, do this in order:
+
+1. Read the slide deck in [docs/offset_and_weight_equivalence.pdf](docs/offset_and_weight_equivalence.pdf).
+2. Run [scripts/tweedie_poisson_offset_from_average.py](scripts/tweedie_poisson_offset_from_average.py) to see why `boost_from_average=False` matters in LightGBM.
+3. Run [scripts/poisson_sim.py](scripts/poisson_sim.py) for the Poisson case.
+4. Run [scripts/tweedie_sim.py](scripts/tweedie_sim.py) for the Tweedie case.
+5. Run [scripts/poisson_tweedie_lightgbm.py](scripts/poisson_tweedie_lightgbm.py) for the full real-data tutorial.
+
+That sequence moves from concept to implementation to realistic usage.
+
+## Core Takeaway
+
+With a log link:
+
+- Poisson: `totals + offset(log(omega))` is equivalent to `rates + weight=omega`
+- Tweedie: `totals + offset(log(omega))` is equivalent to `rates + weight=omega^(2-p)`
+
+The second line is the one many practitioners get wrong.
+
+For Tweedie, dividing by exposure changes the variance:
+
+`Var(Y / omega) = phi * mu^p / omega^(2-p)`
+
+That is why the exact rate weight is `omega^(2-p)`.
+
+## Repository Map
+
+- [scripts/poisson_sim.py](scripts/poisson_sim.py)
+  Synthetic Poisson demonstration of offset vs weighted rates.
+- [scripts/tweedie_sim.py](scripts/tweedie_sim.py)
+  Synthetic Tweedie demonstration showing the exact `omega^(2-p)` weighting.
+- [scripts/poisson_tweedie_lightgbm.py](scripts/poisson_tweedie_lightgbm.py)
+  Main tutorial on real French MTPL data with `scikit-learn` and `LightGBM`.
+- [scripts/tweedie_poisson_offset_from_average.py](scripts/tweedie_poisson_offset_from_average.py)
+  Focused experiment showing the interaction between offsets and `boost_from_average` in `LightGBM`.
+- [docs/nonlife_regression.tex](docs/nonlife_regression.tex)
+  Source for the mathematical slides.
+- [docs/offset_and_weight_equivalence.pdf](docs/offset_and_weight_equivalence.pdf)
+  Compiled slides, if available.
+
+## Get The Repository
+
+If you have not cloned the repo yet:
 
 ```powershell
 git clone https://github.com/ThomasBury/offset_weight_equivalence
 cd offset_weight_equivalence
 ```
 
-Then, pick **ONE** of the two setup methods below. Both create an isolated environment and install the dependencies declared in `pyproject.toml`.
-All commands below are intended for PowerShell (pwsh).
+The commands in this README are written for PowerShell on Windows, since that is the most likely environment for the intended audience. The Python concepts and scripts are not Windows-specific.
 
-### Option A — Setup with Conda
+## Setup
 
-1. **Install Miniforge or Miniconda** (Conda) if you don’t have it.
-    - Miniforge (conda-forge first): <https://conda-forge.org/download/>
+The project metadata currently requires Python `>=3.14`, as declared in [pyproject.toml](pyproject.toml).
 
-2. **Create and activate an environment** (Python 3.13):
+If you want the smoothest setup, use `uv`.
+If you already live in Conda, that is also fine.
 
-    ```powershell
-    # Create a new environment named 'tweedie-regr'
-    conda create -n tweedie-regr -c conda-forge python=3.13
-    
-    # Activate it
-    conda activate tweedie-regr
-    ```
+### Option A: Recommended Setup With `uv`
 
-3. **Install dependencies** from conda-forge:
+Install `uv` if needed:
 
-    ```powershell
-    conda install -c conda-forge numpy pandas scikit-learn matplotlib lightgbm jupyter ipykernel
-    ```
+```powershell
+powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
+```
 
-4. **Verify installation**:
+Restart your terminal, then from the repository root run:
 
-    ```powershell
-    python -c "import numpy, pandas, sklearn, matplotlib, lightgbm; print('OK')"
-    ```
+```powershell
+uv sync
+uv run python -c "import numpy, pandas, sklearn, matplotlib, lightgbm; print('Environment OK')"
+```
 
-5. **Run scripts**:
+Then run the tutorial scripts:
 
-    ```powershell
-    python scripts/poisson_sim.py
-    python scripts/tweedie_sim.py
-    python scripts/poisson_tweedie_lightgbm.py
-    python scripts/tweedie_poisson_offset_from_average.py
-    ```
+```powershell
+uv run python scripts/tweedie_poisson_offset_from_average.py
+uv run python scripts/poisson_sim.py
+uv run python scripts/tweedie_sim.py
+uv run python scripts/poisson_tweedie_lightgbm.py
+```
 
-Notes:
+### Option B: Setup With Conda
 
-- `poisson_tweedie_lightgbm.py` fetches OpenML datasets (internet required on first run).
-- The scripts print metrics/tables and may save PNG figures to the repository root (e.g., lorenz_curve_tweedie.png, calibration_*.png).
+If you prefer Conda, create an environment with a Python version compatible with [pyproject.toml](pyproject.toml):
 
-### Option B — Setup with uv (Fast, Lockfile-based)
+```powershell
+conda create -n offset-weight-equivalence -c conda-forge python=3.14
+conda activate offset-weight-equivalence
+conda install -c conda-forge numpy pandas scikit-learn matplotlib lightgbm jupyter ipykernel pyarrow
+python -c "import numpy, pandas, sklearn, matplotlib, lightgbm; print('Environment OK')"
+```
 
-`uv` is a fast Python package installer and environment manager. These steps will create a virtual environment and run the scripts without needing to manually activate it.
+Then run:
 
-1. **Install `uv`** (PowerShell):
+```powershell
+python scripts/tweedie_poisson_offset_from_average.py
+python scripts/poisson_sim.py
+python scripts/tweedie_sim.py
+python scripts/poisson_tweedie_lightgbm.py
+```
 
-    ```powershell
-    powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
-    ```
+## First Run Expectations
 
-    Close and reopen your terminal to ensure `uv` is in your `PATH`. Verify with `uv --version`.
+Here is what a first-time user should expect:
 
-    or using `pipx` (to install `pipx`: run `pip install -U pipx`)
+- [scripts/poisson_sim.py](scripts/poisson_sim.py) should show that offset and weighted-rate Poisson formulations line up numerically.
+- [scripts/tweedie_sim.py](scripts/tweedie_sim.py) should show the same story for Tweedie when the exact weight `omega^(2-p)` is used.
+- [scripts/tweedie_poisson_offset_from_average.py](scripts/tweedie_poisson_offset_from_average.py) should show that `boost_from_average=True` breaks the clean offset equivalence in LightGBM.
+- [scripts/poisson_tweedie_lightgbm.py](scripts/poisson_tweedie_lightgbm.py) should print comparative metrics and save figures such as Lorenz curves and calibration plots.
 
-    ```powershell
-    pipx install uv
-    ```
+The real-data tutorial fetches OpenML datasets on first use, so internet access is required for that script.
 
-2. **Sync dependencies** from `uv.lock`:
+## Best Starting Script
 
-    ```powershell
-    uv sync
-    ```
+If you are unsure where to begin, start with [scripts/poisson_tweedie_lightgbm.py](scripts/poisson_tweedie_lightgbm.py).
 
-3. **Verify and Run Scripts**: Use `uv run` to execute commands within the managed environment.
+It is the most complete tutorial in the repo because it:
 
-    ```powershell
-    # Verify installation
-    uv run python -c "import numpy, pandas, sklearn, matplotlib, lightgbm; print('OK')"
+- explains the exact Tweedie weight inline,
+- compares exact and heuristic weighting side by side,
+- includes both `scikit-learn` and `LightGBM`,
+- prints a diagnostic gap between the exact LightGBM offset fit and the exact weighted-rate fit,
+- produces plots that are easier to interpret than raw optimization output alone.
 
-    # Run the main scripts
-    uv run python scripts/poisson_sim.py
-    uv run python scripts/tweedie_sim.py
-    uv run python scripts/poisson_tweedie_lightgbm.py
-    uv run python scripts/tweedie_poisson_offset_from_average.py
-    ```
+## Reading The Results
 
-Notes:
+When you run the main tutorial, interpret the output like this:
 
-- If `uv sync` reports issues with `lightgbm` wheels on your platform, you can either:
-  - fall back to Conda for `lightgbm`, or
-  - install a prebuilt wheel compatible with your Python/CPU.
+- `sklearn_rate_w=exp^(2-p)` is the exact Tweedie rate formulation.
+- `lgb_offset` is the totals-plus-offset LightGBM formulation.
+- `lgb_rate_w=exp^(2-p)` is the exact Tweedie weighted-rate LightGBM formulation.
+- `lgb_rate_w=exp` is the Poisson-style heuristic weight, included on purpose as a contrast.
 
-## What Each Script Demonstrates
+The important comparison is:
 
-- **`scripts/poisson_sim.py`**
-  - **Goal**: Show equivalence for Poisson models in LightGBM.
-  - **Methods**: Compares (1) `init_score` offset, (2) weighted rates, and (3) a custom objective function.
-  - **Result**: Confirms that all three methods produce numerically identical predictions.
+- `lgb_offset` vs `lgb_rate_w=exp^(2-p)`
 
-- **`scripts/tweedie_sim.py`**
-  - **Goal**: Show equivalence for Tweedie models across `scikit-learn` and `LightGBM`.
-  - **Methods**: Compares `scikit-learn` (rates + `weight=ω^(2-p)`) with `LightGBM` (offset and weighted rates).
-  - **Result**: Confirms that predictions are nearly identical, validating the equivalence for Tweedie models.
+Those should be very close when the tutorial is behaving correctly.
 
-- **`scripts/poisson_tweedie_lightgbm.py`**
-  - **Goal**: Apply and compare all methods on a real-world insurance dataset.
-  - **Methods**: Fits Poisson and Tweedie models using both `scikit-learn` and `LightGBM` with offset, exact weights, and heuristic weights.
-  - **Result**: Produces comparative metrics, Lorenz curves, and calibration plots, demonstrating the practical implications of each method.
+The interesting non-equivalence is:
 
-- **`scripts/tweedie_poisson_offset_from_average.py`**
-  - **Goal**: Isolate and test the crucial `boost_from_average` parameter in `LightGBM` when using an offset.
-  - **Result**: Empirically proves that `boost_from_average` must be set to `False` when using `init_score` for an offset, as setting it to `True` leads to significant prediction bias.
+- `lgb_rate_w=exp^(2-p)` vs `lgb_rate_w=exp`
 
-## Key Findings
+Those usually differ, because `exp` is not the exact Tweedie rate weight unless `p = 1`.
 
-1. **Equivalence is Confirmed**: For both Poisson and Tweedie models with a log-link, modeling **totals with a log-exposure offset** is mathematically and empirically equivalent to modeling **rates with the correct sample weights** (`weight=exposure` for Poisson, `weight=exposure^(2-p)` for Tweedie).
-2. **`boost_from_average` is Critical for Offsets**: When using the offset method (`init_score`) in LightGBM, it is essential to set `boost_from_average=False`. The default `True` value causes the model to double-count the base rate, leading to incorrect predictions.
-3. **Heuristic Weights are Not Equivalent**: Using a "Poisson-style" weight (`weight=exposure`) for a Tweedie model is a heuristic, not an exact equivalent to the offset method. The experiments show it produces different results from the theoretically correct approaches.
+## Beginner Glossary
 
-## Reproducibility
+- Exposure `omega`
+  Amount of observed risk, often policy-years.
+- Frequency
+  Expected claims per unit exposure.
+- Severity
+  Expected claim size given a claim.
+- Pure premium
+  Expected claim amount per unit exposure.
+- Offset
+  A fixed additive term in the linear predictor, here typically `log(exposure)`.
+- Sample weight
+  A per-row weight used during fitting.
+- Log link
+  The link where `log(mu)` is modeled linearly.
+- Tweedie power `p`
+  The exponent in `Var(Y) = phi * mu^p`.
+- Lorenz curve
+  A rank-ordering plot used to evaluate segmentation.
+- Calibration plot
+  A comparison of observed and predicted rates across bins or categories.
 
-- Seeds are set in scripts where applicable; minor numerical differences can occur between libraries/platforms.
-- For LightGBM runs using early stopping/validation, tree growth is deterministic given the same seed and data ordering.
+## Practical Lessons From This Repo
+
+- If you model Poisson rates, use `sample_weight = exposure`.
+- If you model Tweedie rates, use `sample_weight = exposure^(2-p)`.
+- If you model totals with a log-exposure offset in LightGBM, do not trust the default base-score behavior blindly.
+- If you use LightGBM offsets, make sure train and validation sets receive the same offset convention.
+- If you train on rates, remember that totals are reconstructed as `exposure * predicted_rate`.
+
+## Known Pitfalls
+
+- Using `sample_weight = exposure` for Tweedie because it worked for Poisson.
+  This is the most common conceptual mistake the repo is meant to correct.
+- Forgetting that `boost_from_average` changes the starting raw score in LightGBM.
+  This can make two mathematically equivalent encodings look different in practice.
+- Comparing totals from one model to rates from another without reconstructing them consistently.
+- Ignoring tiny exposures.
+  Very small exposures can create numerical instability and are clamped where needed in the scripts.
 
 ## Troubleshooting
 
-- lightgbm installation on Windows fails with pip/uv:
-  - Use Conda: `conda install -c conda-forge lightgbm`.
-- OpenML download fails or is slow:
-  - Ensure internet access, try again later, or reduce `N_SAMPLES` in the script to speed up experimentation.
-- Very small exposures cause numerical issues:
-  - Scripts clamp exposure with small epsilons (e.g., `1e-9`) where needed.
-- Offsets and early stopping in LightGBM:
-  - When using `init_score` for offsets, ensure validation datasets also carry the same `init_score`; the provided code does this correctly.
+- `lightgbm` fails to install on Windows
+  Try the Conda path first: `conda install -c conda-forge lightgbm`.
+- OpenML download is slow or fails
+  Retry later, check internet access, or work through the simulation scripts first.
+- The real-data tutorial feels too long for a first pass
+  Start with [scripts/tweedie_poisson_offset_from_average.py](scripts/tweedie_poisson_offset_from_average.py), then [scripts/tweedie_sim.py](scripts/tweedie_sim.py).
+- Your exact LightGBM offset and weighted-rate fits are not close
+  Check whether `boost_from_average` has been re-enabled and whether the same exposure treatment is used on validation data.
+
+## Recommended Study Order
+
+If you want a structured learning path, use this order:
+
+1. Slide deck: [docs/offset_and_weight_equivalence.pdf](docs/offset_and_weight_equivalence.pdf)
+2. Offset/base-score caveat: [scripts/tweedie_poisson_offset_from_average.py](scripts/tweedie_poisson_offset_from_average.py)
+3. Poisson equivalence: [scripts/poisson_sim.py](scripts/poisson_sim.py)
+4. Tweedie equivalence: [scripts/tweedie_sim.py](scripts/tweedie_sim.py)
+5. Full tutorial: [scripts/poisson_tweedie_lightgbm.py](scripts/poisson_tweedie_lightgbm.py)
+
+## Summary
+
+This repo exists to make one point unambiguous:
+
+- Poisson rates use weight `omega`
+- Tweedie rates use weight `omega^(2-p)`
+
+If you remember only one practical rule from this tutorial, remember the second line.
