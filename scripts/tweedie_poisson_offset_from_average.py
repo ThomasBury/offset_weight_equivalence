@@ -4,7 +4,8 @@
 #  (B) Tweedie severity with totals label + offset log(exposure)
 # For each, compare models trained with boost_from_average=True vs False.
 from typing import Dict, Optional, Tuple
-import numpy as np, pandas as pd, lightgbm as lgb
+import numpy as np  
+import lightgbm as lgb
 from sklearn.metrics import mean_poisson_deviance, mean_tweedie_deviance
 
 rng = np.random.default_rng(42)
