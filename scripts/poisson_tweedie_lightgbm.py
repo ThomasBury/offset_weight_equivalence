@@ -2,7 +2,19 @@
 # # Real-data comparison on French MTPL (freMTPL2):
 # Tweedie regression ONLY — exposure handling variants compared scientifically.
 # 
-# We compare, for p=1.9:
+# We compare several ways to encode exposure for a Tweedie model with log link.
+# In this script, `P = 1.75`, so the mathematically correct rate weight is
+# `Exposure ** (2 - P) = Exposure ** 0.25`.
+# 
+# The key tutorial point is:
+# 
+# - Totals + offset: `E[Y_i] = Exposure_i * mu_i`
+# - Rates + exact weights: `R_i = Y_i / Exposure_i`, `sample_weight = Exposure_i ** (2 - P)`
+# 
+# Under a Tweedie GLM with log link, those two formulations have the same score.
+# For LightGBM, to make that equivalence visible in practice, we must also disable
+# `boost_from_average`; otherwise LightGBM injects a different global starting value
+# depending on whether we train on totals or rates.
 # 
 # (1) scikit-learn TweedieRegressor (log link, no per-row offsets):
 #
@@ -20,6 +32,8 @@
 #     a) Exposure ** (2 - p)  [GLM-correct for Tweedie rates]
 #     b) Exposure             [portfolio / business weighting]
 # - Lorenz curves (exposure-weighted) and calibration-by-feature plots.
+# - For the LightGBM exact comparison, we also print the max prediction gap
+#   between `offset` and `rates + Exposure ** (2 - p)`.
 # 
 # Note:
 # - LightGBM part requires `lightgbm`. If unavailable, those fits are skipped.
@@ -65,17 +79,218 @@ except Exception:
     LGB_AVAILABLE = False
     warnings.warn("lightgbm not found. LightGBM parts will be skipped.", RuntimeWarning)
 
+# Optional Rich terminal rendering
+try:
+    from rich import box
+    from rich.console import Console
+    from rich.table import Table
+
+    RICH_AVAILABLE = True
+    console = Console()
+except Exception:
+    RICH_AVAILABLE = False
+    console = None
+    warnings.warn("rich not found. Falling back to plain text tables.", RuntimeWarning)
+
 
 # Config
-# Tweedie variance power. Note: the top-level docstring mentions p=1.9, but the code uses 1.25.
+# `P` is the Tweedie variance power used everywhere in this tutorial.
 P = 1.75
+# Keep a small ridge penalty in sklearn for numerical stability with the dense OHE design.
+# The exact offset-vs-weight theorem is unpenalized; here the sklearn section is mainly a
+# practical rate-model tutorial, while the LightGBM section demonstrates the exact encoding.
 ALPHA = 0.1
 RANDOM_STATE = 42
 TEST_SIZE = 0.20
 N_SAMPLES = None        # set to e.g. 200_000 for faster runs; None for full dataset
 NUM_BOOST_ROUND = 100   # LightGBM
 LEARNING_RATE = 0.1
+EXPOSURE_FLOOR = 1e-9
+# Important tutorial switch:
+# disable LightGBM's automatic global base score so that "totals + offset" and
+# "rates + exact weights" start from the same raw-score convention.
+LGB_DISABLE_BOOST_FROM_AVERAGE = True
 np.random.seed(RANDOM_STATE)
+
+# %% [markdown]
+# ## Exposure helpers
+#
+# The two helpers below keep the tutorial implementation aligned with the derivation:
+#
+# - `tweedie_rate_weights(exposure)` returns the exact rate weight `omega ** (2 - p)`.
+# - `log_exposure_offset(exposure)` returns the additive log-offset used in totals models.
+#
+# Using helpers instead of repeating the formulas makes it harder to accidentally mix
+# Poisson-style `omega` weights into the Tweedie examples.
+
+# %%
+def tweedie_rate_weights(exposure: np.ndarray) -> np.ndarray:
+    """Return the exact Tweedie rate weights omega ** (2 - p)."""
+    exposure = np.asarray(exposure, dtype=float)
+    return exposure ** (2.0 - P)
+
+
+def log_exposure_offset(exposure: np.ndarray, floor: float = EXPOSURE_FLOOR) -> np.ndarray:
+    """Return log(exposure) with a safety floor for tiny exposures."""
+    exposure = np.asarray(exposure, dtype=float)
+    return np.log(np.fmax(exposure, floor))
+
+
+# %% [markdown]
+# ## Rich / console output helpers
+#
+# The tutorial prints a fair amount of tabular information. Rich tables make the
+# terminal output easier to scan, especially for side-by-side comparisons between:
+#
+# - exact vs heuristic weights,
+# - offset vs weighted-rate formulations,
+# - Tweedie vs Poisson metrics.
+#
+# The helpers below keep the main modeling code uncluttered and fall back to plain
+# pandas/text output if `rich` is unavailable in the environment.
+
+# %%
+def emit(message: str, style: Optional[str] = None) -> None:
+    """Print a message with Rich when available, else fall back to plain print."""
+    if RICH_AVAILABLE:
+        console.print(message, style=style)
+    else:
+        print(message)
+
+
+def _format_scalar(value: object) -> str:
+    """Format scalar values for readable terminal tables."""
+    if value is None:
+        return "-"
+    if isinstance(value, str):
+        return value
+    try:
+        if pd.isna(value):
+            return "-"
+    except TypeError:
+        pass
+
+    if isinstance(value, (np.integer, int)):
+        return f"{int(value):,}"
+
+    if isinstance(value, (np.floating, float)):
+        value = float(value)
+        abs_value = abs(value)
+        if abs_value >= 10_000:
+            return f"{value:,.2f}"
+        if abs_value >= 1:
+            return f"{value:,.4f}"
+        if abs_value == 0:
+            return "0.0000"
+        return f"{value:.6f}"
+
+    return str(value)
+
+
+def _row_style_from_model(model_name: str) -> str:
+    """Use model naming conventions to assign a meaningful Rich row style."""
+    lower_name = model_name.lower()
+    if "observed" in lower_name:
+        return "bold white"
+    if "offset" in lower_name:
+        return "bold cyan"
+    if "2-p" in lower_name:
+        return "bold green"
+    if "_w=exp" in lower_name or "poisson-style" in lower_name:
+        return "yellow"
+    return ""
+
+
+def print_summary_table(title: str, rows: Tuple[Tuple[str, object], ...]) -> None:
+    """Print a compact two-column summary table."""
+    if not RICH_AVAILABLE:
+        print(f"\n=== {title} ===")
+        for key, value in rows:
+            print(f"{key}: {_format_scalar(value)}")
+        return
+
+    table = Table(title=title, box=box.ROUNDED, header_style="bold magenta", show_edge=True)
+    table.add_column("Item", style="bold")
+    table.add_column("Value", justify="right", style="cyan")
+    for key, value in rows:
+        table.add_row(key, _format_scalar(value))
+    console.print(table)
+
+
+def print_dataframe_table(
+    df: pd.DataFrame,
+    title: str,
+    model_col: str = "model",
+    caption: Optional[str] = None,
+) -> None:
+    """Render a DataFrame as a Rich table with sensible numeric formatting."""
+    if not RICH_AVAILABLE:
+        print(f"\n=== {title} ===")
+        if caption:
+            print(caption)
+        with pd.option_context("display.max_rows", 100, "display.width", 180):
+            print(df)
+        return
+
+    table = Table(
+        title=title,
+        caption=caption,
+        box=box.SIMPLE_HEAVY,
+        header_style="bold magenta",
+        row_styles=["none", "dim"],
+        show_edge=True,
+    )
+
+    numeric_cols = {col for col in df.columns if pd.api.types.is_numeric_dtype(df[col])}
+    for col in df.columns:
+        justify = "right" if col in numeric_cols else "left"
+        style = "bold" if col == model_col else ""
+        table.add_column(str(col), justify=justify, style=style, no_wrap=(col == model_col))
+
+    for _, row in df.iterrows():
+        row_style = _row_style_from_model(str(row[model_col])) if model_col in df.columns else ""
+        table.add_row(*[_format_scalar(row[col]) for col in df.columns], style=row_style)
+
+    console.print(table)
+
+
+def print_grouped_metrics_tables(metrics_df: pd.DataFrame, title_prefix: str) -> None:
+    """Print one metrics table per evaluation weighting."""
+    metrics_reset = metrics_df.reset_index().copy()
+    weight_labels = {
+        "Exposure": "Business weighting: exposure",
+        "Exposure_2mp": f"Exact Tweedie weighting: exposure^(2-p) = exposure^{2.0 - P:.2f}",
+    }
+
+    for eval_weight, subset in metrics_reset.groupby("eval_weight", sort=False):
+        display_df = subset.drop(columns=["eval_weight"]).copy()
+        display_df = display_df.sort_values("model").reset_index(drop=True)
+        caption = weight_labels.get(eval_weight, eval_weight)
+        print_dataframe_table(
+            display_df,
+            title=f"{title_prefix} [{eval_weight}]",
+            caption=caption,
+        )
+
+
+def build_aggregate_comparison_df(
+    observed_label: str,
+    observed_value: float,
+    rows: Tuple[Tuple[str, float], ...],
+    value_col: str,
+) -> pd.DataFrame:
+    """Build an aggregate comparison table with absolute and relative error columns."""
+    table_rows = [(observed_label, observed_value, np.nan, np.nan)]
+    for model_name, predicted_value in rows:
+        abs_error = predicted_value - observed_value
+        rel_error_pct = 100.0 * abs_error / observed_value if observed_value != 0 else np.nan
+        table_rows.append((model_name, predicted_value, abs_error, rel_error_pct))
+
+    return pd.DataFrame(
+        table_rows,
+        columns=["model", value_col, "abs_error", "rel_error_pct"],
+    )
+
 
 # %% [markdown]
 # ## Data loading utilities
@@ -297,7 +512,7 @@ def evaluate_models_table(df_test: pd.DataFrame, pred_dict: Dict[str, np.ndarray
         if wname == "Exposure":
             sw = df_test["Exposure"].to_numpy()
         elif wname == "Exposure_2mp":
-            sw = (df_test["Exposure"].to_numpy()) ** (2.0 - P)
+            sw = tweedie_rate_weights(df_test["Exposure"].to_numpy())
         else:
             raise ValueError("Unknown weight name")
 
@@ -411,8 +626,9 @@ def fit_sklearn_tweedie_rates(X_tr: np.ndarray, X_te: np.ndarray, df_train: pd.D
         Tag, model, train predictions, test predictions.
     """
     if weight_scheme == "exact":
-        wtr = (df_train["Exposure"].to_numpy()) ** (2.0 - P)
-        wte = (df_test["Exposure"].to_numpy()) ** (2.0 - P)
+        # Exact Tweedie rate weighting from Var(Y / omega) = phi * mu^p / omega^(2-p).
+        wtr = tweedie_rate_weights(df_train["Exposure"].to_numpy())
+        wte = tweedie_rate_weights(df_test["Exposure"].to_numpy())
         tag = "sklearn_rate_w=exp^(2-p)"
     elif weight_scheme == "poisson":
         wtr = df_train["Exposure"].to_numpy()
@@ -434,14 +650,15 @@ def fit_sklearn_tweedie_rates(X_tr: np.ndarray, X_te: np.ndarray, df_train: pd.D
 # ## Fitting: LightGBM Tweedie
 
 # %%
-def lgb_offset(X_tr: np.ndarray, X_te: np.ndarray, df_train: pd.DataFrame, df_test: pd.DataFrame) -> Tuple[Optional[lgb.Booster], Tuple[Optional[np.ndarray], Optional[np.ndarray]]]:
+def lgb_offset(X_tr: np.ndarray, X_te: np.ndarray, df_train: pd.DataFrame, df_test: pd.DataFrame) -> Tuple[Optional[lgb.Booster], Optional[np.ndarray], Optional[np.ndarray]]:
     """Fit LightGBM with totals and offset.
 
     LightGBM: totals + offset
       label = ClaimAmount
       init_score = log(Exposure)
       objective = tweedie, tweedie_variance_power=P
-    Returns (model, (yhat_tr_rate, yhat_te_rate))
+      boost_from_average = False to preserve the exact offset/weight equivalence
+    Returns (model, yhat_tr_rate, yhat_te_rate)
 
     Parameters
     ----------
@@ -456,19 +673,22 @@ def lgb_offset(X_tr: np.ndarray, X_te: np.ndarray, df_train: pd.DataFrame, df_te
 
     Returns
     -------
-    Tuple[Optional[lgb.Booster], Tuple[Optional[np.ndarray], Optional[np.ndarray]]]
+    Tuple[Optional[lgb.Booster], Optional[np.ndarray], Optional[np.ndarray]]
         Model and predictions.
     """
     if not LGB_AVAILABLE:
         return None, None, None
 
     y_tr = df_train["ClaimAmount"].to_numpy(dtype=float)
-    init_tr = np.log(np.fmax(df_train["Exposure"].to_numpy(), 1e-3))
+    exposure_tr = df_train["Exposure"].to_numpy(dtype=float)
+    init_tr = log_exposure_offset(exposure_tr)
 
     dtrain = lgb.Dataset(X_tr, label=y_tr, init_score=init_tr)
-    # The validation dataset also needs to be configured correctly if used for early stopping
+    # Validation must receive the same offset convention; otherwise any validation
+    # loss / early stopping logic would be comparing a different objective.
     y_te = df_test["ClaimAmount"].to_numpy(dtype=float)
-    init_te = np.log(np.fmax(df_test["Exposure"].to_numpy(), 1e-3))
+    exposure_te = df_test["Exposure"].to_numpy(dtype=float)
+    init_te = log_exposure_offset(exposure_te)
     dvalid = lgb.Dataset(X_te, label=y_te, init_score=init_te, reference=dtrain)
 
 
@@ -476,6 +696,7 @@ def lgb_offset(X_tr: np.ndarray, X_te: np.ndarray, df_train: pd.DataFrame, df_te
         objective="tweedie",
         tweedie_variance_power=P,
         learning_rate=LEARNING_RATE,
+        boost_from_average=not LGB_DISABLE_BOOST_FROM_AVERAGE,
         verbose=-1,
         seed=RANDOM_STATE,
     )
@@ -485,16 +706,23 @@ def lgb_offset(X_tr: np.ndarray, X_te: np.ndarray, df_train: pd.DataFrame, df_te
                     num_boost_round=NUM_BOOST_ROUND,
                     )
 
+    # LightGBM predict() returns exp(raw_score_from_trees). The per-row init_score
+    # used during training is NOT re-supplied at prediction time, so the returned
+    # values are interpreted here as rates per unit exposure.
     yhat_te_rate = gbm.predict(X_te)
-    yhat_te_tot = yhat_te_rate *  np.fmax(df_test["Exposure"].to_numpy(), 1e-12)
+    yhat_te_tot = yhat_te_rate * np.fmax(exposure_te, 1e-12)
 
-    # Check: total count of claims predicted on test set
-    print("Total predicted claims (offset):", yhat_te_tot.sum())
-    print("Total true claims:", df_test["ClaimAmount"].sum())
+    # Sanity check on reconstructed totals.
+    print_summary_table(
+        "LightGBM Tweedie Offset Sanity Check",
+        (
+            ("Predicted total claim amount", yhat_te_tot.sum()),
+            ("Observed total claim amount", df_test["ClaimAmount"].sum()),
+        ),
+    )
 
-    # Do the same for the training set if needed for evaluation
+    # Do the same for the training set if needed for evaluation.
     yhat_tr_rate = gbm.predict(X_tr)
-    yhat_tr_tot = yhat_tr_rate * np.fmax(df_train["Exposure"].to_numpy(), 1e-12)
 
     return gbm, yhat_tr_rate, yhat_te_rate
 
@@ -531,10 +759,12 @@ def fit_lgb_rates(X_tr: np.ndarray, X_te: np.ndarray, df_train: pd.DataFrame, df
     y_te = df_test["PurePremium"].to_numpy(dtype=float)
 
     if weight_scheme == "exact":
-        wtr = (df_train["Exposure"].to_numpy()) ** (2.0 - P)
-        wte = (df_test["Exposure"].to_numpy()) ** (2.0 - P)
+        # This is the exact Tweedie analogue of Poisson's exposure weights.
+        wtr = tweedie_rate_weights(df_train["Exposure"].to_numpy())
+        wte = tweedie_rate_weights(df_test["Exposure"].to_numpy())
         tag = "lgb_rate_w=exp^(2-p)"
     elif weight_scheme == "poisson":
+        # Included on purpose as a heuristic baseline: correct only in the Poisson case p=1.
         wtr = df_train["Exposure"].to_numpy()
         wte = df_test["Exposure"].to_numpy()
         tag = "lgb_rate_w=exp"
@@ -548,6 +778,7 @@ def fit_lgb_rates(X_tr: np.ndarray, X_te: np.ndarray, df_train: pd.DataFrame, df
         objective="tweedie",
         tweedie_variance_power=P,
         learning_rate=LEARNING_RATE,
+        boost_from_average=not LGB_DISABLE_BOOST_FROM_AVERAGE,
         verbose=-1,
         seed=RANDOM_STATE,
     )
@@ -635,12 +866,10 @@ def fit_lgb_poisson_offset_counts(X_tr: np.ndarray, X_te: np.ndarray, df_train: 
     y_tr = df_train["ClaimNb"].to_numpy(dtype=float)
     y_te = df_test["ClaimNb"].to_numpy(dtype=float)
 
-    # Offsets: log(exposure) with tiny floor
-    eps = 1e-9
     exp_tr = df_train["Exposure"].to_numpy(dtype=float)
     exp_te = df_test["Exposure"].to_numpy(dtype=float)
-    init_tr = np.log(np.fmax(exp_tr, eps))
-    init_te = np.log(np.fmax(exp_te, eps))
+    init_tr = log_exposure_offset(exp_tr)
+    init_te = log_exposure_offset(exp_te)
 
     dtrain = lgb.Dataset(X_tr, label=y_tr, init_score=init_tr)
     dvalid = lgb.Dataset(X_te, label=y_te, init_score=init_te, reference=dtrain)
@@ -648,6 +877,7 @@ def fit_lgb_poisson_offset_counts(X_tr: np.ndarray, X_te: np.ndarray, df_train: 
     params = dict(
         objective="poisson",
         learning_rate=LEARNING_RATE,
+        boost_from_average=not LGB_DISABLE_BOOST_FROM_AVERAGE,
         verbose=-1,
         seed=RANDOM_STATE,
     )
@@ -659,14 +889,20 @@ def fit_lgb_poisson_offset_counts(X_tr: np.ndarray, X_te: np.ndarray, df_train: 
         num_boost_round=NUM_BOOST_ROUND,
     )
 
-    # Predictions are RATES (per unit exposure)
+    # As in the Tweedie offset example above, predict() is interpreted here as a
+    # per-unit-exposure rate. Reconstruct totals by multiplying back by exposure.
     yhat_tr_rate = gbm.predict(X_tr)
     yhat_te_rate = gbm.predict(X_te)
 
     # Check: total count of claims predicted on test set
     yhat_te_tot = yhat_te_rate * exp_te
-    print("Total predicted claims (poisson offset):", yhat_te_tot.sum())
-    print("Total true claims:", y_te.sum())
+    print_summary_table(
+        "LightGBM Poisson Offset Sanity Check",
+        (
+            ("Predicted total claim count", yhat_te_tot.sum()),
+            ("Observed total claim count", y_te.sum()),
+        ),
+    )
 
     return tag, gbm, yhat_tr_rate, yhat_te_rate
 
@@ -711,7 +947,7 @@ def fit_lgb_poisson_rates_weights(X_tr: np.ndarray, X_te: np.ndarray, df_train: 
     params = dict(
         objective="poisson",
         learning_rate=LEARNING_RATE,
-        boost_from_average=True, # Default is fine here
+        boost_from_average=not LGB_DISABLE_BOOST_FROM_AVERAGE,
         verbose=-1,
         seed=RANDOM_STATE,
     )
@@ -737,11 +973,33 @@ column_trans = build_column_transformer()
 X_train = column_trans.fit_transform(df_train)
 X_test = column_trans.transform(df_test)
 
-print(f"Train size: {len(df_train):,}, Test size: {len(df_test):,}")
-print(f"Tweedie power p = {P}, alpha = {ALPHA}, LightGBM rounds = {NUM_BOOST_ROUND}")
+print_summary_table(
+    "Run Configuration",
+    (
+        ("Train size", len(df_train)),
+        ("Test size", len(df_test)),
+        ("Tweedie power p", P),
+        ("Ridge alpha (sklearn)", ALPHA),
+        ("LightGBM rounds", NUM_BOOST_ROUND),
+        (
+            "Exact-equivalence mode",
+            "boost_from_average=False"
+            if LGB_DISABLE_BOOST_FROM_AVERAGE
+            else "boost_from_average=True",
+        ),
+    ),
+)
 
 # %% [markdown]
 # ## Pure Premium Model Fitting (Tweedie)
+# 
+# The two "exact" Tweedie LightGBM models below should now be numerically very close:
+# 
+# - `lgb_offset`: totals + `init_score = log(exposure)`
+# - `lgb_rate_w=exp^(2-p)`: rates + exact Tweedie weights
+# 
+# If they are not close, the first thing to check is whether some default such as
+# `boost_from_average` reintroduced a different starting raw score.
 
 # %%
 # --- sklearn: rates + weights (exact and poisson-style) ---
@@ -759,6 +1017,15 @@ if LGB_AVAILABLE:
         tag_lgb_exact: lgb_exact_te,
         tag_lgb_pois: lgb_pois_te,
     }
+    print_summary_table(
+        "LightGBM Exact Equivalence Check",
+        (
+            (
+                "Max abs gap: offset vs exact weighted rate",
+                np.max(np.abs(lgb_off_te - lgb_exact_te)),
+            ),
+        ),
+    )
 
 # Collect predictions on TEST (rates)
 pred_rate_test = {
@@ -794,16 +1061,14 @@ ax.legend(loc="lower right")
 plt.tight_layout()
 plt.savefig("lorenz_curve_tweedie.png")
 plt.close(fig)
-print("\nSaved Tweedie Lorenz curve to lorenz_curve_tweedie.png")
+emit("Saved Tweedie Lorenz curve to lorenz_curve_tweedie.png", style="green")
 
 # %% [markdown]
 # ## Metrics tables (TEST) under two evaluation weightings
 
 # %%
 metrics_tbl = evaluate_models_table(df_test, pred_rate_test, weights_for_eval=("Exposure", "Exposure_2mp"))
-print("\n=== Metrics on TEST (rates), under two evaluation weightings ===")
-with pd.option_context("display.max_rows", 100, "display.width", 160):
-    print(metrics_tbl.sort_index())
+print_grouped_metrics_tables(metrics_tbl.sort_index(), title_prefix="Tweedie Test Metrics")
 
 # %% [markdown]
 # ## Aggregate totals comparison (TEST)
@@ -811,7 +1076,6 @@ with pd.option_context("display.max_rows", 100, "display.width", 160):
 # %%
 y_true_tot = (df_test["PurePremium"].to_numpy() * exposure_test).sum()
 agg_rows = [
-    ("Observed totals", y_true_tot),
     (tag_sk_exact, np.sum(exposure_test * sk_exact_te)),
     (tag_sk_pois,  np.sum(exposure_test * sk_pois_te)),
 ]
@@ -821,10 +1085,17 @@ if LGB_AVAILABLE:
         (tag_lgb_exact, np.sum(exposure_test * lgb_exact_te)),
         (tag_lgb_pois,  np.sum(exposure_test * lgb_pois_te)),
     ])
-agg_df = pd.DataFrame(agg_rows, columns=["model", "sum_predicted_totals"]).set_index("model")
-print("\n=== Aggregate predicted totals on TEST ===")
-with pd.option_context("display.float_format", "{:.2f}".format):
-    print(agg_df)
+agg_df = build_aggregate_comparison_df(
+    observed_label="Observed totals",
+    observed_value=y_true_tot,
+    rows=tuple(agg_rows),
+    value_col="sum_predicted_totals",
+)
+print_dataframe_table(
+    agg_df,
+    title="Aggregate Predicted Totals On TEST",
+    caption="Absolute and relative error are measured against the observed total claim amount.",
+)
 
 # %% [markdown]
 # ## Calibration by feature (TEST): pick 2 interpretable features
@@ -871,7 +1142,7 @@ for feat in feature_list:
     plt.tight_layout()
     plt.savefig(f"calibration_sklearn_{feat}.png")
     plt.close(fig)
-    print(f"Saved sklearn calibration plot for {feat} to calibration_sklearn_{feat}.png")
+    emit(f"Saved sklearn calibration plot for {feat} to calibration_sklearn_{feat}.png", style="green")
 
     # --- LightGBM models comparison ---
     if LGB_AVAILABLE:
@@ -907,7 +1178,7 @@ for feat in feature_list:
         plt.tight_layout()
         plt.savefig(f"calibration_lgbm_{feat}.png")
         plt.close(fig)
-        print(f"Saved LightGBM calibration plot for {feat} to calibration_lgbm_{feat}.png")
+        emit(f"Saved LightGBM calibration plot for {feat} to calibration_lgbm_{feat}.png", style="green")
 
 # %% [markdown]
 # ---
@@ -949,9 +1220,11 @@ pred_freq_test.update(lgb_poi_pred)
 
 # %%
 metrics_freq_tbl = evaluate_frequency_models_table(df_test, pred_freq_test)
-print("\n=== Metrics on TEST (frequency), exposure-weighted ===")
-with pd.option_context("display.max_rows", 100, "display.width", 160):
-    print(metrics_freq_tbl.sort_index())
+print_dataframe_table(
+    metrics_freq_tbl.sort_index().reset_index(),
+    title="Poisson Frequency Test Metrics [Exposure]",
+    caption="All frequency metrics are exposure-weighted, matching the Poisson rate formulation.",
+)
 
 # %% [markdown]
 # ## Aggregate Claim Count Comparison (TEST)
@@ -960,15 +1233,22 @@ with pd.option_context("display.max_rows", 100, "display.width", 160):
 exposure_test_freq = df_test["Exposure"].to_numpy()
 y_true_counts = df_test["ClaimNb"].to_numpy().sum()
 
-agg_rows_freq = [("Observed counts", y_true_counts)]
+agg_rows_freq = []
 for model_name, pred_rate in pred_freq_test.items():
     pred_counts = np.sum(exposure_test * pred_rate)
     agg_rows_freq.append((model_name, pred_counts))
 
-agg_df_freq = pd.DataFrame(agg_rows_freq, columns=["model", "sum_predicted_counts"]).set_index("model")
-print("\n=== Aggregate predicted claim counts on TEST ===")
-with pd.option_context("display.float_format", "{:,.2f}".format):
-    print(agg_df_freq)
+agg_df_freq = build_aggregate_comparison_df(
+    observed_label="Observed counts",
+    observed_value=y_true_counts,
+    rows=tuple(agg_rows_freq),
+    value_col="sum_predicted_counts",
+)
+print_dataframe_table(
+    agg_df_freq,
+    title="Aggregate Predicted Claim Counts On TEST",
+    caption="Absolute and relative error are measured against the observed total claim count.",
+)
 
 # %% [markdown]
 # ## Lorenz & Calibration Plots for Frequency (TEST)
@@ -998,7 +1278,7 @@ ax.legend(loc="lower right")
 plt.tight_layout()
 plt.savefig("lorenz_curve_frequency.png")
 plt.close(fig)
-print("\nSaved Frequency Lorenz curve to lorenz_curve_frequency.png")
+emit("Saved Frequency Lorenz curve to lorenz_curve_frequency.png", style="green")
 
 # --- Calibration Plot ---
 feat = "DrivAge" # Pick one feature for demonstration
@@ -1037,7 +1317,7 @@ ax.legend()
 plt.tight_layout()
 plt.savefig("calibration_frequency_DrivAge.png")
 plt.close(fig)
-print("Saved Frequency calibration plot for DrivAge to calibration_frequency_DrivAge.png")
+emit("Saved Frequency calibration plot for DrivAge to calibration_frequency_DrivAge.png", style="green")
 # %%
 pred_freq_test
 # %%

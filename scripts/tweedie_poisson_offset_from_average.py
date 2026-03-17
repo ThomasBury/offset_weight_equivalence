@@ -1,14 +1,59 @@
-# Empirical test: effect of `boost_from_average` when using an offset via `init_score=log(Exposure)`
-# We'll run two experiments:
-#  (A) Poisson frequency with counts label + offset log(exposure)
-#  (B) Tweedie severity with totals label + offset log(exposure)
-# For each, compare models trained with boost_from_average=True vs False.
+"""Empirical test of LightGBM `boost_from_average` with exposure offsets.
+
+This script isolates one operational caveat that matters for the other tutorials:
+when exposure is encoded as `init_score = log(exposure)`, `boost_from_average`
+must be disabled if you want a clean offset interpretation.
+
+We run two experiments:
+1. Poisson frequency with counts labels + offset log(exposure)
+2. Tweedie totals with totals labels + offset log(exposure)
+"""
+
 from typing import Dict, Optional, Tuple
 import numpy as np  
 import lightgbm as lgb
 from sklearn.metrics import mean_poisson_deviance, mean_tweedie_deviance
 
+try:
+    from rich import box
+    from rich.console import Console
+    from rich.table import Table
+
+    RICH_AVAILABLE = True
+    console = Console()
+except Exception:
+    RICH_AVAILABLE = False
+    console = None
+
 rng = np.random.default_rng(42)
+
+
+def _format_value(value: object) -> str:
+    """Format values for compact terminal summaries."""
+    if isinstance(value, (np.integer, int)):
+        return f"{int(value):,}"
+    if isinstance(value, (np.floating, float)):
+        value = float(value)
+        if abs(value) >= 1:
+            return f"{value:,.4f}"
+        return f"{value:.6f}"
+    return str(value)
+
+
+def print_summary_table(title: str, rows: Tuple[Tuple[str, object], ...]) -> None:
+    """Print a two-column summary table."""
+    if not RICH_AVAILABLE:
+        print(f"\n=== {title} ===")
+        for key, value in rows:
+            print(f"{key}: {_format_value(value)}")
+        return
+
+    table = Table(title=title, box=box.SIMPLE_HEAVY, header_style="bold magenta")
+    table.add_column("Metric", style="bold")
+    table.add_column("Value", justify="right", style="cyan")
+    for key, value in rows:
+        table.add_row(key, _format_value(value))
+    console.print(table)
 
 def make_poisson_synth(n: int = 200_000) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Generate synthetic data for a Poisson regression model.
@@ -213,6 +258,23 @@ def summarize_tweedie(
     agg_pred = (rate_pred * exposure).sum()
     return dict(tweedie_dev=dev, agg_true_totals=agg_true, agg_pred_totals=agg_pred, ratio=agg_pred/agg_true)
 
+
+def print_comparison(title: str, metrics_false: Dict[str, float], metrics_true: Dict[str, float]) -> None:
+    """Print a side-by-side summary for boost_from_average=False vs True."""
+    rows = []
+    for key in metrics_false:
+        false_value = metrics_false[key]
+        true_value = metrics_true[key]
+        rows.extend(
+            [
+                (f"{key} | boost_from_average=False", false_value),
+                (f"{key} | boost_from_average=True", true_value),
+            ]
+        )
+    if "ratio" in metrics_false:
+        rows.append(("ratio gap (True - False)", metrics_true["ratio"] - metrics_false["ratio"]))
+    print_summary_table(title, tuple(rows))
+
 # ===== Experiment A: Poisson counts + offset =====
 X, expA, rateA, countsA = make_poisson_synth(n=250_000)
 
@@ -222,9 +284,7 @@ m_true,  rate_pred_true  = fit_lgb_offset(X, expA, countsA, objective='poisson',
 sumA_false = summarize_poisson(rateA, expA, countsA, rate_pred_false)
 sumA_true  = summarize_poisson(rateA, expA, countsA, rate_pred_true)
 
-print("=== Poisson counts + offset ===")
-print("boost_from_average = False:", sumA_false)
-print("boost_from_average = True :", sumA_true)
+print_comparison("Poisson Counts + Offset", sumA_false, sumA_true)
 
 # ===== Experiment B: Tweedie totals + offset =====
 p = 1.5
@@ -236,6 +296,4 @@ mt_true,  rate_pred_true_B  = fit_lgb_offset(X, expB, totalsB, objective='tweedi
 sumB_false = summarize_tweedie(rateB, expB, totalsB, rate_pred_false_B, p=p)
 sumB_true  = summarize_tweedie(rateB, expB, totalsB, rate_pred_true_B, p=p)
 
-print("\n=== Tweedie totals + offset (p=1.5) ===")
-print("boost_from_average = False:", sumB_false)
-print("boost_from_average = True :", sumB_true)
+print_comparison("Tweedie Totals + Offset (p=1.5)", sumB_false, sumB_true)

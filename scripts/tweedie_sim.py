@@ -36,7 +36,56 @@ except Exception:
     LGB_AVAILABLE = False
     warnings.warn("lightgbm not found. LightGBM experiments will be skipped.", RuntimeWarning)
 
+try:
+    from rich import box
+    from rich.console import Console
+    from rich.table import Table
+
+    RICH_AVAILABLE = True
+    console = Console()
+except Exception:
+    RICH_AVAILABLE = False
+    console = None
+
 np.set_printoptions(suppress=True, linewidth=120)
+EXPOSURE_FLOOR = 1e-9
+LGB_DISABLE_BOOST_FROM_AVERAGE = True
+
+
+def emit(message: str) -> None:
+    """Print a message with Rich when available."""
+    if RICH_AVAILABLE:
+        console.print(message)
+    else:
+        print(message)
+
+
+def _format_value(value: object) -> str:
+    """Format values for terminal tables."""
+    if isinstance(value, (np.integer, int)):
+        return f"{int(value):,}"
+    if isinstance(value, (np.floating, float)):
+        value = float(value)
+        if abs(value) >= 1:
+            return f"{value:,.4f}"
+        return f"{value:.6e}"
+    return str(value)
+
+
+def print_table(title: str, rows: typing.Iterable[typing.Tuple[str, object]]) -> None:
+    """Print a simple two-column summary table."""
+    if not RICH_AVAILABLE:
+        print(f"\n=== {title} ===")
+        for key, value in rows:
+            print(f"{key}: {_format_value(value)}")
+        return
+
+    table = Table(title=title, box=box.SIMPLE_HEAVY, header_style="bold magenta")
+    table.add_column("Metric", style="bold")
+    table.add_column("Value", justify="right", style="cyan")
+    for key, value in rows:
+        table.add_row(str(key), _format_value(value))
+    console.print(table)
 
 #%%
 
@@ -307,6 +356,8 @@ def fit_lgbm_tweedie_totals_offset(
     """Fit a LightGBM Tweedie model on totals with a log-exposure offset.
 
     The offset is provided via `init_score = log(exposure)`.
+    To preserve the exact equivalence with the weighted-rate formulation, we
+    disable `boost_from_average`.
 
     Parameters
     ----------
@@ -326,7 +377,8 @@ def fit_lgbm_tweedie_totals_offset(
     Returns
     -------
     Tuple[Optional[lgb.Booster], Tuple[Optional[np.ndarray], Optional[np.ndarray]]]
-        The fitted model and predicted totals for train and test sets. Returns None if LightGBM is not available.
+        The fitted model and predicted totals for train and test sets. Returns
+        None if LightGBM is not available.
     """
     if not LGB_AVAILABLE:
         return None, (None, None)
@@ -335,8 +387,10 @@ def fit_lgbm_tweedie_totals_offset(
     yte = df_test["Total"].to_numpy(dtype=float)
     Xtr = df_train[feature_cols].to_numpy()
     Xte = df_test[feature_cols].to_numpy()
-    init_tr = np.log(df_train["Exposure"].to_numpy())
-    init_te = np.log(df_test["Exposure"].to_numpy())
+    exposure_tr = df_train["Exposure"].to_numpy(dtype=float)
+    exposure_te = df_test["Exposure"].to_numpy(dtype=float)
+    init_tr = np.log(np.fmax(exposure_tr, EXPOSURE_FLOOR))
+    init_te = np.log(np.fmax(exposure_te, EXPOSURE_FLOOR))
 
     dtrain = lgb.Dataset(Xtr, label=ytr, init_score=init_tr)
     dvalid = lgb.Dataset(Xte, label=yte, init_score=init_te, reference=dtrain)
@@ -350,6 +404,7 @@ def fit_lgbm_tweedie_totals_offset(
         # feature_fraction=0.9,
         # bagging_fraction=0.9,
         # bagging_freq=1,
+        boost_from_average=not LGB_DISABLE_BOOST_FROM_AVERAGE,
         verbose=-1,
         seed=seed,
     )
@@ -360,8 +415,13 @@ def fit_lgbm_tweedie_totals_offset(
         num_boost_round=num_boost_round,
     )
 
-    yhat_tr = gbm.predict(Xtr)
-    yhat_te = gbm.predict(Xte)
+    # LightGBM predict() returns the tree-only contribution. Because the offset is
+    # supplied via init_score during training, we reconstruct totals explicitly as:
+    # exposure * predicted_rate.
+    rhat_tr = gbm.predict(Xtr)
+    rhat_te = gbm.predict(Xte)
+    yhat_tr = rhat_tr * exposure_tr
+    yhat_te = rhat_te * exposure_te
     return gbm, (yhat_tr, yhat_te)
 
 
@@ -423,6 +483,7 @@ def fit_lgbm_tweedie_rates_weights(
         # feature_fraction=0.9,
         # bagging_fraction=0.9,
         # bagging_freq=1,
+        boost_from_average=not LGB_DISABLE_BOOST_FROM_AVERAGE,
         verbose=-1,
         seed=seed,
     )
@@ -498,6 +559,16 @@ seed = 42
 df = make_insurance_data(n=N, p_index=p, phi=phi, n_features=8, seed=seed)
 feature_cols = [c for c in df.columns if c.startswith("x")]
 df_train, df_test = train_test_split(df, test_size=test_size, random_state=seed, shuffle=True)
+print_table(
+    "Run Configuration",
+    (
+        ("n_samples", N),
+        ("Tweedie power p", p),
+        ("dispersion phi (generator)", phi),
+        ("alpha (sklearn)", alpha),
+        ("LightGBM exact-equivalence mode", "boost_from_average=False" if LGB_DISABLE_BOOST_FROM_AVERAGE else "boost_from_average=True"),
+    ),
+)
 
 #%%
 # -------------------------
@@ -512,31 +583,49 @@ yte = df_test["Total"].to_numpy()
 wtr_tot = None  # for totals; we compare cross-models so we can use unweighted deviance
 wte_tot = None
 
-print("\n=== scikit-learn (rates + ω^(2-p) weights) ===")
-dev_tr = evaluate_deviance(ytr, sk_yhat_tr, p, sample_weight=wtr_tot, name="train")
-dev_te = evaluate_deviance(yte, sk_yhat_te, p, sample_weight=wte_tot, name="test")
+dev_tr = evaluate_deviance(ytr, sk_yhat_tr, p, sample_weight=wtr_tot)
+dev_te = evaluate_deviance(yte, sk_yhat_te, p, sample_weight=wte_tot)
+print_table(
+    "scikit-learn (rates + exposure^(2-p) weights)",
+    (
+        ("train half-deviance", dev_tr),
+        ("test half-deviance", dev_te),
+    ),
+)
 
 #%%
 # -------------------------
 # LightGBM (if available): totals + offset (init_score)
 # -------------------------
 if LGB_AVAILABLE:
-    print("\n=== LightGBM (totals + offset via init_score=log ω) ===")
     lgb_off_model, (lgb_off_yhat_tr, lgb_off_yhat_te) = \
         fit_lgbm_tweedie_totals_offset(df_train, df_test, feature_cols, p, num_boost_round=400, seed=seed)
 
-    dev_tr_off = evaluate_deviance(ytr, lgb_off_yhat_tr, p, name="train")
-    dev_te_off = evaluate_deviance(yte, lgb_off_yhat_te, p, name="test")
+    dev_tr_off = evaluate_deviance(ytr, lgb_off_yhat_tr, p)
+    dev_te_off = evaluate_deviance(yte, lgb_off_yhat_te, p)
+    print_table(
+        "LightGBM (totals + offset via init_score=log exposure)",
+        (
+            ("train half-deviance", dev_tr_off),
+            ("test half-deviance", dev_te_off),
+        ),
+    )
 
     # -------------------------
     # LightGBM: rates + ω^(2-p) weights (exact)
     # -------------------------
-    print("\n=== LightGBM (rates + weights ω^(2-p)) ===")
     lgb_wt_model, (lgb_wt_yhat_tr, lgb_wt_yhat_te), _ = \
         fit_lgbm_tweedie_rates_weights(df_train, df_test, feature_cols, p, num_boost_round=400, seed=seed)
 
-    dev_tr_wt = evaluate_deviance(ytr, lgb_wt_yhat_tr, p, name="train")
-    dev_te_wt = evaluate_deviance(yte, lgb_wt_yhat_te, p, name="test")
+    dev_tr_wt = evaluate_deviance(ytr, lgb_wt_yhat_tr, p)
+    dev_te_wt = evaluate_deviance(yte, lgb_wt_yhat_te, p)
+    print_table(
+        "LightGBM (rates + weights exposure^(2-p))",
+        (
+            ("train half-deviance", dev_tr_wt),
+            ("test half-deviance", dev_te_wt),
+        ),
+    )
 
     # -------------------------
     # Equivalence checks (numerical)
@@ -561,39 +650,42 @@ if LGB_AVAILABLE:
         denom = np.maximum(np.abs(a) + np.abs(b), 1e-6)
         return math.sqrt(np.mean(((a - b) / denom) ** 2))
 
-    print("\n=== Equivalence checks (test set) ===")
-    print(f"RMSE between LGB offset totals and LGB rates+ω^(2-p): "
-          f"{mean_squared_error(lgb_off_yhat_te, lgb_wt_yhat_te):.6f}")
-    print(f"Relative RMSE (scale-free): {rel_rmse(lgb_off_yhat_te, lgb_wt_yhat_te):.6e}")
-
-    print(f"RMSE between sklearn and LGB offset totals: "
-          f"{mean_squared_error(sk_yhat_te, lgb_off_yhat_te):.6f}")
-    print(f"Relative RMSE: {rel_rmse(sk_yhat_te, lgb_off_yhat_te):.6e}")
-
-    print(f"RMSE between sklearn and LGB rates+ω^(2-p): "
-          f"{mean_squared_error(sk_yhat_te, lgb_wt_yhat_te):.6f}")
-    print(f"Relative RMSE: {rel_rmse(sk_yhat_te, lgb_wt_yhat_te):.6e}")
+    print_table(
+        "Equivalence Checks (test set)",
+        (
+            ("RMSE: LGB offset vs LGB exact weighted rate", mean_squared_error(lgb_off_yhat_te, lgb_wt_yhat_te)),
+            ("Relative RMSE: LGB offset vs LGB exact weighted rate", rel_rmse(lgb_off_yhat_te, lgb_wt_yhat_te)),
+            ("RMSE: sklearn vs LGB offset", mean_squared_error(sk_yhat_te, lgb_off_yhat_te)),
+            ("Relative RMSE: sklearn vs LGB offset", rel_rmse(sk_yhat_te, lgb_off_yhat_te)),
+            ("RMSE: sklearn vs LGB exact weighted rate", mean_squared_error(sk_yhat_te, lgb_wt_yhat_te)),
+            ("Relative RMSE: sklearn vs LGB exact weighted rate", rel_rmse(sk_yhat_te, lgb_wt_yhat_te)),
+        ),
+    )
 
     # Optional: assert closeness (tolerances depend on boosting stochasticity)
     # You can tighten these if you fix seeds and disable bagging.
     # assert rel_rmse(lgb_off_yhat_te, lgb_wt_yhat_te) < 5e-3, "LightGBM encodings not matching closely."
 else:
-    print("\n[LightGBM unavailable] Skipping offset/weights equivalence checks for LightGBM.")
+    emit("\n[LightGBM unavailable] Skipping offset/weights equivalence checks for LightGBM.")
 
 #%%
 # -------------------------
 # Special cases sanity (optional small runs): p=1 (Poisson) and p=2 (Gamma)
 # -------------------------
 for p_special in (1.0, 2.0):
-    print(f"\n=== Special case p = {p_special:.1f} ===")
     df_sp = make_insurance_data(n=40_000, p_index=p_special, phi=phi, n_features=6, seed=123)
     df_tr, df_te = train_test_split(df_sp, test_size=0.25, random_state=0)
     # sklearn: rates + exposure^(2 - p)
     glm_sp, (yhat_tr_sp, yhat_te_sp), _, _ = \
         fit_sklearn_tweedie_rates(df_tr, df_te, [c for c in df_sp.columns if c.startswith("x")],
                                   p_special, alpha=alpha)
-    dev_sp = evaluate_deviance(df_te["Total"].to_numpy(), yhat_te_sp, p_special, name="test deviance (sklearn)")
-    # Expect: if p=1 → weights=exposure; if p=2 → weights=1 (both included by exposure**(2-p))
-    print("OK; sklearn uses correct weights exposure**(2 - p).")
+    dev_sp = evaluate_deviance(df_te["Total"].to_numpy(), yhat_te_sp, p_special)
+    print_table(
+        f"Special Case p = {p_special:.1f}",
+        (
+            ("test deviance (sklearn)", dev_sp),
+            ("expected rate weight", "exposure" if p_special == 1.0 else "1"),
+        ),
+    )
 
-print("\nAll done.")
+emit("\nAll done.")

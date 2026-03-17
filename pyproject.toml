@@ -10,5 +10,6 @@ dependencies = [
     "numpy>=2.3.3",
     "pandas>=2.2.0",
     "pyarrow>=22.0.0",
+    "rich>=13.9.4",
     "scikit-learn>=1.7.2",
 ]

@@ -1,3 +1,17 @@
+"""Synthetic Poisson exposure tutorial.
+
+This script is intentionally small and discrete. It shows three equivalent ways
+to teach the Poisson case with exposure:
+
+1. counts + offset via ``init_score = log(exposure)``
+2. rates + weights via ``weight = exposure``
+3. a custom objective that injects the offset directly in the gradients
+
+Compared with the main real-data tutorial, this file keeps the feature space and
+data-generating process simple enough that the equivalence is easy to inspect by
+eye in the terminal output.
+"""
+
 # %%
 import pandas as pd
 import numpy as np
@@ -5,9 +19,56 @@ from typing import Tuple
 import lightgbm as lgb
 from scipy.stats import poisson
 
+try:
+    from rich import box
+    from rich.console import Console
+    from rich.table import Table
+
+    RICH_AVAILABLE = True
+    console = Console()
+except Exception:
+    RICH_AVAILABLE = False
+    console = None
+
 # %%
 # Set seed for reproducibility
 np.random.seed(100)
+
+
+def emit(message: str) -> None:
+    """Print a message with Rich when available."""
+    if RICH_AVAILABLE:
+        console.print(message)
+    else:
+        print(message)
+
+
+def _format_value(value: object) -> str:
+    """Format scalars for compact terminal tables."""
+    if isinstance(value, (np.integer, int)):
+        return f"{int(value):,}"
+    if isinstance(value, (np.floating, float)):
+        value = float(value)
+        if abs(value) >= 1:
+            return f"{value:,.4f}"
+        return f"{value:.6f}"
+    return str(value)
+
+
+def print_table(title: str, df: pd.DataFrame) -> None:
+    """Render a DataFrame as a Rich table when possible."""
+    if not RICH_AVAILABLE:
+        print(f"\n=== {title} ===")
+        print(df)
+        return
+
+    table = Table(title=title, box=box.SIMPLE_HEAVY, header_style="bold magenta")
+    numeric_cols = {col for col in df.columns if pd.api.types.is_numeric_dtype(df[col])}
+    for col in df.columns:
+        table.add_column(col, justify="right" if col in numeric_cols else "left")
+    for _, row in df.iterrows():
+        table.add_row(*[_format_value(row[col]) for col in df.columns])
+    console.print(table)
 
 # %% [markdown]
 # # DATA GENERATION
@@ -72,10 +133,14 @@ data_mod = generate_claim_counts(data_mod, var_impact)
 # # CHECKS
 # %%
 # CHECKS
-print("Data Basic counts:")
-print(data_basic.groupby(['var1', 'var2', 'expos']).size().reset_index(name='N'))
-print("\nData Easy Poisson check:")
-print(data_easy.groupby(['var1', 'var2', 'expos', 'lambda'])['claim_count'].mean().reset_index())
+print_table(
+    "Data Basic Counts",
+    data_basic.groupby(['var1', 'var2', 'expos']).size().reset_index(name='N'),
+)
+print_table(
+    "Data Easy Poisson Check",
+    data_easy.groupby(['var1', 'var2', 'expos', 'lambda'])['claim_count'].mean().reset_index(),
+)
 
 # %% [markdown]
 # # SOLUTION 1: init_score
@@ -291,6 +356,7 @@ def solution_3_predict(data_curr: pd.DataFrame) -> np.ndarray:
         'num_iterations': 100,
         'learning_rate': 0.5,
         'verbose': -1,
+        'boost_from_average': False,
     }
 
     lgb_model = lgb.train(param, dtrain)
@@ -305,29 +371,41 @@ data_mod['sol_3_predict'] = np.exp(data_mod['sol_3_predict_raw']) * data_mod['ex
 # %%
 # ANALYSIS (example checks)
 
-print("\n\n--- Analysis of Predicted Counts (should match lambda) ---")
+emit("\n[bold]Analysis of Predicted Counts (should match lambda)[/bold]")
 for i in [1, 2, 3]:
-    print(f"\nSolution {i} (Easy Data) Check:")
-    # For a given lambda, the predicted count should be close to it
-    print(data_easy.groupby('lambda')[f'sol_{i}_predict'].mean())
+    solution_check = (
+        data_easy.groupby('lambda')[f'sol_{i}_predict']
+        .mean()
+        .reset_index(name='mean_predicted_count')
+    )
+    print_table(f"Solution {i} (Easy Data)", solution_check)
 
 
-print("\n\n--- Aggregate Claim Count Comparison (Mod Data) ---")
-print(f"Observed counts: {data_mod['claim_count'].sum():.2f}")
-print(f"Theoretical counts: {data_mod['lambda'].sum():.2f}")
+agg_rows = [
+    ("Observed counts", data_mod['claim_count'].sum()),
+    ("Theoretical counts", data_mod['lambda'].sum()),
+]
 for i in [1, 2, 3]:
     pred_sum = data_mod[f'sol_{i}_predict'].sum()
-    print(f"Solution {i} predicted counts: {pred_sum:.2f}")
+    agg_rows.append((f"Solution {i} predicted counts", pred_sum))
+print_table(
+    "Aggregate Claim Count Comparison (Mod Data)",
+    pd.DataFrame(agg_rows, columns=["item", "value"]),
+)
 
 
-
-print("\n\n--- Equivalence Checks (comparing final predicted counts) ---")
+equivalence_rows = []
 for sol_pair in [("sol_1_predict", "sol_2_predict"), ("sol_1_predict", "sol_3_predict")]:
     mismatches = data_easy[~np.isclose(data_easy[sol_pair[0]], data_easy[sol_pair[1]])]
-    print(f"Mismatches between {sol_pair[0]} and {sol_pair[1]} (Easy Data): {len(mismatches)}")
-
     mismatches_mod = data_mod[~np.isclose(data_mod[sol_pair[0]], data_mod[sol_pair[1]])]
-    print(f"Mismatches between {sol_pair[0]} and {sol_pair[1]} (Mod Data):  {len(mismatches_mod)}")
+    equivalence_rows.append(
+        {
+            "comparison": f"{sol_pair[0]} vs {sol_pair[1]}",
+            "easy_mismatches": len(mismatches),
+            "mod_mismatches": len(mismatches_mod),
+        }
+    )
+print_table("Equivalence Checks", pd.DataFrame(equivalence_rows))
 # %%
 data_easy.head()
 # %%
